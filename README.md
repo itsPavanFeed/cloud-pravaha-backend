@@ -38,7 +38,7 @@ Cloud Pravaha is a multi-tenant OpenTofu platform that deploys only **pinned pub
 - **The wrapper.** Central authenticates the user and checks they have a role in the tenant. It then forwards the request to that tenant's backend over mTLS.
   - It strips the user's token and attaches a 60-second ES256 assertion: who the user is, their roles in that tenant, and the exact method and path.
   - The tenant plane accepts user requests only with central's client certificate plus a valid assertion. The assertion is checked for audience (this tenant), request binding and expiry, and can be used only once.
-- **Data residency.** Central stores identity and the directory only. Stacks, plans, state and run logs stay in each tenant's own database.
+- **Data residency.** Central stores identity and the directory only. Stacks, plans, state and run logs stay in each tenant's own database, and optionally in the tenant's own bucket for state and plans.
 - **Roles.**
   - **Platform:** `platform_admin` onboards tenants and holds everything `tenant_admin` and `auditor` have in every tenant. A platform admin also sees every business unit and can author stacks and runs in any of them, but signs approvals only with an explicit manager, FinOps or Security role. Their actions are audited as `platform-admin:<email>`.
   - **Tenant-wide:** `tenant_admin`, `finops`, `security`, `auditor`. They see every entity.
@@ -168,6 +168,8 @@ Secrets can be given directly or as `NAME_FILE` pointing to a mounted secret.
 | `PRAVAHA_CENTRAL_CLIENT_CA` | CA that issued central's client certificate. Only certificates from it, with client-auth usage, are accepted |
 | `PRAVAHA_CENTRAL_CA_FILE`, `PRAVAHA_CENTRAL_JWKS_FILE` | Optional: CA for central's TLS; a static JWKS instead of fetching it |
 | `PRAVAHA_CATALOG_DIR`, `PRAVAHA_TOFU_VERSION` | Catalog directory; exact OpenTofu version (default `1.13.2`) |
+| `PRAVAHA_BUCKET_URL` | Optional tenant bucket for state versions and saved plans: `s3://bucket[/prefix]?endpoint=https://…&region=…` (AWS S3, MinIO, Ceph, SeaweedFS, GCS interoperability). The database then keeps only keys and checksums |
+| `PRAVAHA_BUCKET_ACCESS_KEY`, `PRAVAHA_BUCKET_SECRET_KEY` | Bucket credentials (use `_FILE` variants); `PRAVAHA_BUCKET_CREATE=1` creates the bucket on start |
 
 **Runner:** `PRAVAHA_SERVER_URL` (its tenant plane), `PRAVAHA_RUNNER_TOKEN`, `PRAVAHA_STATE_KEY` (32+ characters, shared by the pool, never seen by any plane), `PRAVAHA_CA_FILE`, `PRAVAHA_CATALOG_DIR` (pins the catalog locally), `PRAVAHA_PLUGIN_CACHE_DIR`, `PRAVAHA_WORK_DIR`.
 
@@ -219,7 +221,7 @@ See [SECURITY.md](SECURITY.md) for the security controls and how they map to com
 
 This build covers the tenancy core of the platform design. Coming next:
 - Pull-request plans: speculative plans posted back to Git pull requests
-- Temporal workflows and per-tenant buckets
+- Temporal workflows
 - Resource discovery for backporting (listing a cloud account's resources to suggest imports)
 - LLM integration with RAG
 - SSO

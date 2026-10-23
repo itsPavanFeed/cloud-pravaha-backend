@@ -32,6 +32,11 @@ type Server struct {
 	CentralJWKSFile string // static JWKS instead of fetching it (optional)
 
 	AllowLocalContracts bool // development only: contracts from a local directory
+
+	BucketURL       string // s3://bucket[/prefix]?endpoint=...&region=... (optional)
+	BucketAccessKey string
+	BucketSecretKey string
+	BucketCreate    bool // create the bucket on start (development)
 }
 
 // Central configures the central plane: frontend, identity, tenant routing.
@@ -80,6 +85,11 @@ func LoadServer() (*Server, error) {
 		CentralJWKSFile: os.Getenv("PRAVAHA_CENTRAL_JWKS_FILE"),
 
 		AllowLocalContracts: os.Getenv("PRAVAHA_ALLOW_LOCAL_CONTRACTS") == "1",
+
+		BucketURL:       os.Getenv("PRAVAHA_BUCKET_URL"),
+		BucketAccessKey: secret("PRAVAHA_BUCKET_ACCESS_KEY"),
+		BucketSecretKey: secret("PRAVAHA_BUCKET_SECRET_KEY"),
+		BucketCreate:    os.Getenv("PRAVAHA_BUCKET_CREATE") == "1",
 	}
 	var errs []error
 	errs = append(errs, common(c.DatabaseURL, c.MasterKey, c.PublicURL, false)...)

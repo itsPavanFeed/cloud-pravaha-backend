@@ -209,10 +209,20 @@ func (s *Server) agentPlan(w http.ResponseWriter, r *http.Request) {
 	est := cost.Of(up.Summary)
 	rk := risk.ClassifyWith(up.Summary, run.Operation, env.Tier, est.MonthlyDelta, s.riskSettings(ctx))
 	var sealed []byte
+	var object string
 	if status == "planned" {
 		if sealed, err = s.sealer.Seal(up.Plan, planAAD(run.ID, up.SHA256)); err != nil {
 			s.writeStoreErr(w, err, "")
 			return
+		}
+		if s.objects != nil {
+			object = planKey(run.ID)
+			if err := s.objects.Put(ctx, object, sealed); err != nil {
+				s.log.Error("storing plan in bucket", "err", err)
+				writeErr(w, http.StatusServiceUnavailable, "could not store the plan")
+				return
+			}
+			sealed = nil
 		}
 	}
 	_, serial, err := s.store.CurrentState(ctx, st.ID)
@@ -225,7 +235,7 @@ func (s *Server) agentPlan(w http.ResponseWriter, r *http.Request) {
 	rkj, _ := json.Marshal(rk)
 	cj, _ := json.Marshal(est)
 	if err := s.store.SetPlanned(ctx, run.ID, store.Planned{Status: status, Sealed: sealed, SHA256: up.SHA256, Summary: summary,
-		Policy: pol, Risk: rkj, Cost: cj, Required: rk.Steps, Serial: serial}); err != nil {
+		Policy: pol, Risk: rkj, Cost: cj, Object: object, Required: rk.Steps, Serial: serial}); err != nil {
 		s.writeStoreErr(w, err, "run is not planning")
 		return
 	}
@@ -310,6 +320,25 @@ func (s *Server) driftScheduler(ctx context.Context) {
 	}
 }
 
+func planKey(runID string) string { return "plans/" + runID + ".sealed" }
+
+// cleanupPlans deletes bucket copies of plans whose runs have ended.
+func (s *Server) cleanupPlans(ctx context.Context) {
+	if s.objects == nil {
+		return
+	}
+	ids, err := s.store.FinishedPlanObjects(ctx)
+	if err != nil {
+		s.log.Error("listing finished plans", "err", err)
+		return
+	}
+	for _, id := range ids {
+		if err := s.objects.Delete(ctx, planKey(id)); err != nil {
+			s.log.Warn("deleting plan object", "run", id, "err", err)
+		}
+	}
+}
+
 func planAAD(runID, sha string) []byte { return []byte("plan:" + runID + ":" + sha) }
 
 func (s *Server) agentGetPlan(w http.ResponseWriter, r *http.Request) {
@@ -318,10 +347,21 @@ func (s *Server) agentGetPlan(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusConflict, "run is not applying")
 		return
 	}
-	sealed, sha, err := s.store.PlanBlob(r.Context(), run.ID)
+	sealed, object, sha, err := s.store.PlanBlob(r.Context(), run.ID)
 	if err != nil {
 		s.writeStoreErr(w, err, "")
 		return
+	}
+	if object != "" {
+		if s.objects == nil {
+			writeErr(w, http.StatusInternalServerError, "plan is in a bucket but no bucket is configured")
+			return
+		}
+		if sealed, err = s.objects.Get(r.Context(), object); err != nil {
+			s.log.Error("reading plan from bucket", "err", err)
+			writeErr(w, http.StatusServiceUnavailable, "could not read the plan")
+			return
+		}
 	}
 	plan, err := s.sealer.Open(sealed, planAAD(run.ID, sha))
 	if err != nil || secure.SHA256Hex(plan) != sha {
@@ -356,6 +396,7 @@ func (s *Server) agentFinish(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreErr(w, err, "run already finished")
 		return
 	}
+	s.cleanupPlans(context.WithoutCancel(r.Context()))
 	s.audit(r.Context(), who(r).Subject(), "run."+b.Status, "run/"+run.ID, run.BU, map[string]string{"stack": run.StackName, "error": b.Error})
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -379,12 +420,24 @@ func (s *Server) state(w http.ResponseWriter, r *http.Request) {
 	actor := "run:" + run.ID
 	switch r.Method {
 	case http.MethodGet:
-		data, _, err := s.store.CurrentState(ctx, stackID)
+		ref, err := s.store.LatestState(ctx, stackID)
 		if err != nil {
 			s.writeStoreErr(w, err, "")
 			return
 		}
-		if data == nil {
+		data := ref.Data
+		if ref.Object != "" {
+			if s.objects == nil {
+				writeErr(w, http.StatusInternalServerError, "state is in a bucket but no bucket is configured")
+				return
+			}
+			if data, err = s.objects.Get(ctx, ref.Object); err != nil || secure.SHA256Hex(data) != ref.SHA256 {
+				s.log.Error("state object missing or altered", "stack", stackID, "err", err)
+				writeErr(w, http.StatusInternalServerError, "stored state failed integrity verification")
+				return
+			}
+		}
+		if ref.Serial == 0 {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -406,7 +459,17 @@ func (s *Server) state(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		sha := secure.SHA256Hex(data)
-		serial, err := s.store.PutState(ctx, stackID, run.ID, data, sha)
+		var object string
+		if s.objects != nil {
+			object = "state/" + stackID + "/" + sha + ".tfstate" // content-addressed: rewrites are idempotent
+			if err := s.objects.Put(ctx, object, data); err != nil {
+				s.log.Error("storing state in bucket", "err", err)
+				writeErr(w, http.StatusServiceUnavailable, "could not store state")
+				return
+			}
+			data = nil
+		}
+		serial, err := s.store.PutState(ctx, stackID, run.ID, data, object, sha)
 		if err != nil {
 			s.writeStoreErr(w, err, "")
 			return

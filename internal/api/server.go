@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/blob"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/catalog"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/config"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/httpx"
@@ -42,6 +43,7 @@ type Server struct {
 	log     *slog.Logger
 	limiter *httpx.Limiter
 	central *centralKeys
+	objects *blob.S3 // tenant bucket for state and plans; nil = keep them in PostgreSQL
 	wakeMu  sync.Mutex
 	wake    chan struct{} // closed to nudge long-polling runners when work is queued
 }
@@ -51,8 +53,22 @@ func New(cfg *config.Server, st *store.Store, cat *catalog.Catalog, sealer *secu
 	if err != nil {
 		return nil, err
 	}
-	return &Server{cfg: cfg, store: st, catalog: cat, sealer: sealer, issuer: iss, log: log, central: ck,
-		limiter: httpx.NewLimiter(10, time.Minute, 5*time.Minute), wake: make(chan struct{})}, nil
+	srv := &Server{cfg: cfg, store: st, catalog: cat, sealer: sealer, issuer: iss, log: log, central: ck,
+		limiter: httpx.NewLimiter(10, time.Minute, 5*time.Minute), wake: make(chan struct{})}
+	if cfg.BucketURL != "" {
+		bc, err := blob.ParseURL(cfg.BucketURL, cfg.BucketAccessKey, cfg.BucketSecretKey)
+		if err != nil {
+			return nil, fmt.Errorf("PRAVAHA_BUCKET_URL: %w", err)
+		}
+		srv.objects = blob.New(bc, nil)
+		if cfg.BucketCreate {
+			if err := srv.objects.EnsureBucket(context.Background()); err != nil {
+				return nil, fmt.Errorf("creating bucket: %w", err)
+			}
+		}
+		log.Info("state and plans are stored in the tenant bucket", "bucket", bc.Bucket, "endpoint", bc.Endpoint)
+	}
+	return srv, nil
 }
 
 func (s *Server) Handler() http.Handler {
@@ -156,6 +172,7 @@ func (s *Server) reaper(ctx context.Context) {
 				s.audit(ctx, "system", "run.reaped", "run/"+id, "", nil)
 			}
 			s.store.ReleaseRunLocks(ctx)
+			s.cleanupPlans(ctx)
 		}
 	}
 }

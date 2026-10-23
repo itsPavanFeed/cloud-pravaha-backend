@@ -512,6 +512,7 @@ type Planned struct {
 	Policy   []byte
 	Risk     []byte
 	Cost     []byte
+	Object   string // bucket key when the sealed plan lives in object storage
 	Required []string
 	Serial   int64
 }
@@ -521,22 +522,25 @@ func (s *Store) SetPlanned(ctx context.Context, runID string, p Planned) error {
 	tag, err := s.db.Exec(ctx, `UPDATE runs SET status = $2, plan_sealed = $3, plan_sha256 = $4, plan_summary = $5, policy_result = $6,
 			risk = $7, required_approvals = $8, state_serial = $9, planned_at = now(), updated_at = now(),
 			run_token_hash = NULL, run_token_expires_at = NULL,
-			finished_at = CASE WHEN $10 THEN now() END, cost = $11
-		WHERE id = $1 AND status = 'planning'`, runID, p.Status, p.Sealed, p.SHA256, p.Summary, p.Policy, p.Risk, p.Required, p.Serial, terminal, p.Cost)
+			finished_at = CASE WHEN $10 THEN now() END, cost = $11, plan_object = NULLIF($12, '')
+		WHERE id = $1 AND status = 'planning'`, runID, p.Status, p.Sealed, p.SHA256, p.Summary, p.Policy, p.Risk, p.Required, p.Serial, terminal, p.Cost, p.Object)
 	if err == nil && tag.RowsAffected() == 0 {
 		return ErrConflict
 	}
 	return err
 }
 
-func (s *Store) PlanBlob(ctx context.Context, runID string) ([]byte, string, error) {
-	var b []byte
-	var sha *string
-	err := s.db.QueryRow(ctx, `SELECT plan_sealed, plan_sha256 FROM runs WHERE id = $1`, runID).Scan(&b, &sha)
-	if err != nil || b == nil || sha == nil {
-		return nil, "", ErrNotFound
+// PlanBlob returns a run's sealed plan (or the bucket key holding it) and its checksum.
+func (s *Store) PlanBlob(ctx context.Context, runID string) (sealed []byte, object, sha string, err error) {
+	var obj, sum *string
+	err = s.db.QueryRow(ctx, `SELECT plan_sealed, plan_object, plan_sha256 FROM runs WHERE id = $1`, runID).Scan(&sealed, &obj, &sum)
+	if err != nil || sum == nil || (sealed == nil && obj == nil) {
+		return nil, "", "", ErrNotFound
 	}
-	return b, *sha, nil
+	if obj != nil {
+		object = *obj
+	}
+	return sealed, object, *sum, nil
 }
 
 var (
@@ -700,6 +704,24 @@ func (s *Store) ListPolicySets(ctx context.Context) ([]*PolicySet, error) {
 	return Collect(rows, scanPS)
 }
 
+// FinishedPlanObjects returns bucket keys of plans whose runs have ended, so
+// they can be deleted.
+func (s *Store) FinishedPlanObjects(ctx context.Context) ([]string, error) {
+	rows, err := s.db.Query(ctx, `UPDATE runs SET plan_object = NULL WHERE plan_object IS NOT NULL
+		AND status IN ('applied','failed','discarded','no_changes','policy_failed','no_drift','drifted') RETURNING id::text`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		rows.Scan(&id)
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 // ---- tenant settings ----
 
 // Setting loads a JSON setting into v; it reports false when unset.
@@ -727,21 +749,42 @@ func (s *Store) PutSetting(ctx context.Context, key string, v any, by string) er
 
 // ---- state (OpenTofu HTTP backend) ----
 
-func (s *Store) CurrentState(ctx context.Context, stackID string) ([]byte, int64, error) {
-	var b []byte
-	var serial int64
-	err := s.db.QueryRow(ctx, `SELECT data, serial FROM state_versions WHERE stack_id = $1 ORDER BY serial DESC LIMIT 1`, stackID).Scan(&b, &serial)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, 0, nil
-	}
-	return b, serial, err
+// StateRef is the latest state version: inline data or a bucket key.
+type StateRef struct {
+	Data   []byte
+	Object string
+	SHA256 string
+	Serial int64
 }
 
-func (s *Store) PutState(ctx context.Context, stackID, runID string, data []byte, sha string) (int64, error) {
+// LatestState returns the newest state version (Serial 0 when there is none).
+func (s *Store) LatestState(ctx context.Context, stackID string) (StateRef, error) {
+	var r StateRef
+	var obj *string
+	err := s.db.QueryRow(ctx, `SELECT data, object_key, sha256, serial FROM state_versions WHERE stack_id = $1 ORDER BY serial DESC LIMIT 1`, stackID).
+		Scan(&r.Data, &obj, &r.SHA256, &r.Serial)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return StateRef{}, nil
+	}
+	if obj != nil {
+		r.Object = *obj
+	}
+	return r, err
+}
+
+// CurrentState returns inline state data and serial; callers that support
+// object storage use LatestState.
+func (s *Store) CurrentState(ctx context.Context, stackID string) ([]byte, int64, error) {
+	r, err := s.LatestState(ctx, stackID)
+	return r.Data, r.Serial, err
+}
+
+// PutState records a new state version, either inline (data) or as a bucket key (object).
+func (s *Store) PutState(ctx context.Context, stackID, runID string, data []byte, object, sha string) (int64, error) {
 	var serial int64
-	err := s.db.QueryRow(ctx, `INSERT INTO state_versions (stack_id, serial, data, sha256, run_id)
-		SELECT $1, COALESCE(MAX(serial), 0) + 1, $2, $3, $4 FROM state_versions WHERE stack_id = $1 RETURNING serial`,
-		stackID, data, sha, runID).Scan(&serial)
+	err := s.db.QueryRow(ctx, `INSERT INTO state_versions (stack_id, serial, data, object_key, sha256, run_id)
+		SELECT $1, COALESCE(MAX(serial), 0) + 1, $2, NULLIF($3, ''), $4, $5 FROM state_versions WHERE stack_id = $1 RETURNING serial`,
+		stackID, data, object, sha, runID).Scan(&serial)
 	return serial, err
 }
 
@@ -754,7 +797,7 @@ type StateVersion struct {
 }
 
 func (s *Store) StateVersions(ctx context.Context, stackID string) ([]StateVersion, error) {
-	rows, err := s.db.Query(ctx, `SELECT serial, sha256, length(data), run_id, created_at FROM state_versions WHERE stack_id = $1 ORDER BY serial DESC LIMIT 100`, stackID)
+	rows, err := s.db.Query(ctx, `SELECT serial, sha256, COALESCE(length(data), 0), run_id, created_at FROM state_versions WHERE stack_id = $1 ORDER BY serial DESC LIMIT 100`, stackID)
 	if err != nil {
 		return nil, err
 	}
