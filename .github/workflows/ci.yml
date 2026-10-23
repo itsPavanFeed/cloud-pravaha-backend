@@ -1,0 +1,33 @@
+name: ci
+on: [push, pull_request]
+permissions: { contents: read }
+# Cross-repo checkouts below assume the sibling repositories are readable by
+# this workflow (public, or add a token with read access).
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version-file: go.mod }
+      - run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - run: go mod verify
+      - run: go vet ./...
+      - run: go test -race ./...
+      - run: go build -trimpath -o bin/pravaha ./cmd/pravaha
+      - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with: { repository: itsPavanFeed/cloud-pravaha-backend, path: cloud-pravaha-backend }
+      - uses: actions/checkout@v4
+        with: { repository: itsPavanFeed/cloud-pravaha-modules, path: cloud-pravaha-modules }
+      - uses: actions/checkout@v4
+        with: { repository: itsPavanFeed/cloud-pravaha-test-resources, path: cloud-pravaha-test-resources }
+      - uses: actions/setup-go@v5
+        with: { go-version-file: cloud-pravaha-backend/go.mod, cache-dependency-path: cloud-pravaha-backend/go.sum }
+      - uses: opentofu/setup-opentofu@v1
+        with: { tofu_version: 1.13.2, tofu_wrapper: false }
+      - run: ./cloud-pravaha-test-resources/e2e/run.sh
