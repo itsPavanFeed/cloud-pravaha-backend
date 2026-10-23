@@ -22,6 +22,7 @@ type Summary struct {
 	Change    int              `json:"change"`
 	Destroy   int              `json:"destroy"`
 	Replace   int              `json:"replace"`
+	Imports   int              `json:"imports,omitempty"` // existing resources adopted into state
 	Resources []ResourceChange `json:"resources"`
 	Outputs   []string         `json:"outputs,omitempty"`
 }

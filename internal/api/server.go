@@ -88,6 +88,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/runs/{id}/discard", u(s.discardRun))
 	mux.Handle("GET /api/v1/audit", u(s.listAudit))
 	mux.Handle("GET /api/v1/audit/verify", u(s.verifyAudit))
+	mux.Handle("GET /api/v1/settings/risk", u(s.getRiskSettings))
+	mux.Handle("PUT /api/v1/settings/risk", u(s.putRiskSettings))
 	mux.Handle("GET /api/v1/runners", u(s.listRunners))
 	mux.Handle("POST /api/v1/runners", u(s.createRunner))
 	mux.Handle("DELETE /api/v1/runners/{id}", u(s.revokeRunner))

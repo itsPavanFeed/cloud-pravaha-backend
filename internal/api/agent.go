@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/catalog"
+	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/cost"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/oidc"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/policy"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/redact"
@@ -187,7 +188,8 @@ func (s *Server) agentPlan(w http.ResponseWriter, r *http.Request) {
 	case !up.Summary.HasChanges():
 		status = "no_changes"
 	}
-	rk := risk.Classify(up.Summary, run.Operation, env.Tier)
+	est := cost.Of(up.Summary)
+	rk := risk.ClassifyWith(up.Summary, run.Operation, env.Tier, est.MonthlyDelta, s.riskSettings(ctx))
 	var sealed []byte
 	if status == "planned" {
 		if sealed, err = s.sealer.Seal(up.Plan, planAAD(run.ID, up.SHA256)); err != nil {
@@ -203,15 +205,16 @@ func (s *Server) agentPlan(w http.ResponseWriter, r *http.Request) {
 	summary, _ := json.Marshal(up.Summary)
 	pol, _ := json.Marshal(res)
 	rkj, _ := json.Marshal(rk)
+	cj, _ := json.Marshal(est)
 	if err := s.store.SetPlanned(ctx, run.ID, store.Planned{Status: status, Sealed: sealed, SHA256: up.SHA256, Summary: summary,
-		Policy: pol, Risk: rkj, Required: rk.Steps, Serial: serial}); err != nil {
+		Policy: pol, Risk: rkj, Cost: cj, Required: rk.Steps, Serial: serial}); err != nil {
 		s.writeStoreErr(w, err, "run is not planning")
 		return
 	}
 	s.audit(ctx, who(r).Subject(), "run.planned", "run/"+run.ID, run.Entity, map[string]any{
 		"status": status, "add": up.Summary.Add, "change": up.Summary.Change, "destroy": up.Summary.Destroy, "replace": up.Summary.Replace,
 		"policy_passed": res.Passed, "violations": len(res.Violations), "plan_sha256": up.SHA256, "state_serial": serial,
-		"risk": rk.Level, "required_approvals": rk.Steps,
+		"risk": rk.Level, "required_approvals": rk.Steps, "monthly_cost_delta_usd": est.MonthlyDelta,
 	})
 	writeJSON(w, 200, map[string]any{"status": status, "risk": rk.Level, "required_approvals": rk.Steps})
 }

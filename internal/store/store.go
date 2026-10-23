@@ -240,6 +240,7 @@ type Run struct {
 	PlanSummary       json.RawMessage `json:"plan_summary,omitempty"`
 	PolicyResult      json.RawMessage `json:"policy_result,omitempty"`
 	Risk              json.RawMessage `json:"risk,omitempty"`
+	Cost              json.RawMessage `json:"cost,omitempty"`
 	RequiredApprovals []string        `json:"required_approvals"`
 	Approvals         []Approval      `json:"approvals"`
 	Error             *string         `json:"error,omitempty"`
@@ -251,7 +252,7 @@ type Run struct {
 }
 
 const runSelect = `SELECT r.id, r.stack_id, s.name, s.entity, e.name, r.operation, r.status, r.created_by,
-	r.config_hash, r.state_serial, r.plan_sha256, r.plan_summary, r.policy_result, r.risk, r.required_approvals, r.error, r.runner_id,
+	r.config_hash, r.state_serial, r.plan_sha256, r.plan_summary, r.policy_result, r.risk, r.cost, r.required_approvals, r.error, r.runner_id,
 	r.created_at, r.updated_at, r.planned_at, r.finished_at,
 	COALESCE((SELECT json_agg(json_build_object('step', a.step, 'approver', a.approver, 'reason', a.reason, 'created_at', a.created_at) ORDER BY a.created_at)
 	          FROM run_approvals a WHERE a.run_id = r.id), '[]')
@@ -261,7 +262,7 @@ func scanRun(r pgx.Row) (*Run, error) {
 	var x Run
 	var approvals []byte
 	err := r.Scan(&x.ID, &x.StackID, &x.StackName, &x.Entity, &x.Environment, &x.Operation, &x.Status, &x.CreatedBy,
-		&x.ConfigHash, &x.StateSerial, &x.PlanSHA256, &x.PlanSummary, &x.PolicyResult, &x.Risk, &x.RequiredApprovals, &x.Error, &x.RunnerID,
+		&x.ConfigHash, &x.StateSerial, &x.PlanSHA256, &x.PlanSummary, &x.PolicyResult, &x.Risk, &x.Cost, &x.RequiredApprovals, &x.Error, &x.RunnerID,
 		&x.CreatedAt, &x.UpdatedAt, &x.PlannedAt, &x.FinishedAt, &approvals)
 	if err == nil {
 		json.Unmarshal(approvals, &x.Approvals)
@@ -377,6 +378,7 @@ type Planned struct {
 	Summary  []byte
 	Policy   []byte
 	Risk     []byte
+	Cost     []byte
 	Required []string
 	Serial   int64
 }
@@ -386,8 +388,8 @@ func (s *Store) SetPlanned(ctx context.Context, runID string, p Planned) error {
 	tag, err := s.db.Exec(ctx, `UPDATE runs SET status = $2, plan_sealed = $3, plan_sha256 = $4, plan_summary = $5, policy_result = $6,
 			risk = $7, required_approvals = $8, state_serial = $9, planned_at = now(), updated_at = now(),
 			run_token_hash = NULL, run_token_expires_at = NULL,
-			finished_at = CASE WHEN $10 THEN now() END
-		WHERE id = $1 AND status = 'planning'`, runID, p.Status, p.Sealed, p.SHA256, p.Summary, p.Policy, p.Risk, p.Required, p.Serial, terminal)
+			finished_at = CASE WHEN $10 THEN now() END, cost = $11
+		WHERE id = $1 AND status = 'planning'`, runID, p.Status, p.Sealed, p.SHA256, p.Summary, p.Policy, p.Risk, p.Required, p.Serial, terminal, p.Cost)
 	if err == nil && tag.RowsAffected() == 0 {
 		return ErrConflict
 	}
@@ -515,6 +517,31 @@ func (s *Store) Reap(ctx context.Context, silentFor, planTTL time.Duration) ([]s
 		ids = append(ids, id)
 	}
 	return ids, rows.Err()
+}
+
+// ---- tenant settings ----
+
+// Setting loads a JSON setting into v; it reports false when unset.
+func (s *Store) Setting(ctx context.Context, key string, v any) (bool, error) {
+	var b []byte
+	err := s.db.QueryRow(ctx, `SELECT value FROM tenant_settings WHERE key = $1`, key).Scan(&b)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, json.Unmarshal(b, v)
+}
+
+func (s *Store) PutSetting(ctx context.Context, key string, v any, by string) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(ctx, `INSERT INTO tenant_settings (key, value, updated_by) VALUES ($1, $2, $3)
+		ON CONFLICT (key) DO UPDATE SET value = $2, updated_by = $3, updated_at = now()`, key, b, by)
+	return err
 }
 
 // ---- state (OpenTofu HTTP backend) ----

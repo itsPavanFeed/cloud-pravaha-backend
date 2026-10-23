@@ -8,6 +8,7 @@
 package risk
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -20,8 +21,69 @@ const (
 	Medium = "medium"
 	High   = "high"
 
-	largeChange = 25
+	defaultLargeChange = 25
 )
+
+// Settings are a tenant's risk policy. Zero values are never used: Default()
+// fills them and Validate() rejects anything incoherent.
+type Settings struct {
+	LargeChange int                 `json:"large_change"`    // more changes than this raise risk to medium
+	ProdLevel   string              `json:"prod_level"`      // minimum risk for production environments: medium or high
+	CostMedium  float64             `json:"cost_medium_usd"` // monthly increase that raises risk to medium (0 = off)
+	CostHigh    float64             `json:"cost_high_usd"`   // monthly increase that raises risk to high (0 = off)
+	Approvals   map[string][]string `json:"approvals"`       // risk level -> required approval steps
+}
+
+func Default() Settings {
+	return Settings{LargeChange: defaultLargeChange, ProdLevel: Medium, CostMedium: 100, CostHigh: 1000, Approvals: map[string][]string{
+		Low:    {identity.StepManager},
+		Medium: {identity.StepManager, identity.StepFinOps},
+		High:   {identity.StepManager, identity.StepFinOps, identity.StepSecurity},
+	}}
+}
+
+// Validate keeps a tenant from weakening the chain below a sane floor: every
+// level needs at least one approval, high risk always needs security, and a
+// higher level never needs fewer approvals than a lower one.
+func (s Settings) Validate() error {
+	var errs []error
+	if s.LargeChange < 1 || s.LargeChange > 10000 {
+		errs = append(errs, errors.New("large_change must be between 1 and 10000"))
+	}
+	if s.ProdLevel != Medium && s.ProdLevel != High {
+		errs = append(errs, errors.New(`prod_level must be "medium" or "high"`))
+	}
+	if s.CostMedium < 0 || s.CostHigh < 0 || (s.CostHigh > 0 && s.CostMedium > s.CostHigh) {
+		errs = append(errs, errors.New("cost thresholds must be positive, with cost_medium_usd at or below cost_high_usd (0 disables one)"))
+	}
+	prev := 0
+	for _, l := range []string{Low, Medium, High} {
+		steps := s.Approvals[l]
+		if len(steps) == 0 {
+			errs = append(errs, fmt.Errorf("risk level %s needs at least one approval", l))
+		}
+		seen := map[string]bool{}
+		for _, st := range steps {
+			if seen[st] || (st != identity.StepManager && st != identity.StepFinOps && st != identity.StepSecurity) {
+				errs = append(errs, fmt.Errorf("risk level %s: invalid or repeated step %q", l, st))
+			}
+			seen[st] = true
+		}
+		if len(steps) < prev {
+			errs = append(errs, fmt.Errorf("risk level %s cannot need fewer approvals than a lower level", l))
+		}
+		prev = len(steps)
+		if l == High && !seen[identity.StepSecurity] {
+			errs = append(errs, errors.New("high risk must always include the security approval"))
+		}
+	}
+	for l := range s.Approvals {
+		if l != Low && l != Medium && l != High {
+			errs = append(errs, fmt.Errorf("unknown risk level %q", l))
+		}
+	}
+	return errors.Join(errs...)
+}
 
 type Result struct {
 	Level   string   `json:"level"`
@@ -35,7 +97,13 @@ const (
 	TierNonProd = "nonprod"
 )
 
+// Classify uses the default settings and no cost information.
 func Classify(s policy.Summary, operation, tier string) Result {
+	return ClassifyWith(s, operation, tier, 0, Default())
+}
+
+// ClassifyWith applies a tenant's settings and the plan's monthly cost increase.
+func ClassifyWith(s policy.Summary, operation, tier string, monthlyDelta float64, cfg Settings) Result {
 	level := Low
 	var reasons []string
 	raise := func(to, why string) {
@@ -52,12 +120,20 @@ func Classify(s policy.Summary, operation, tier string) Result {
 		raise(High, fmt.Sprintf("%d resource(s) deleted or replaced", n))
 	}
 	if tier == TierProd {
-		raise(Medium, "production environment")
+		raise(cfg.ProdLevel, "production environment")
+	}
+	if cfg.CostHigh > 0 && monthlyDelta >= cfg.CostHigh {
+		raise(High, fmt.Sprintf("estimated cost increase $%.2f/month", monthlyDelta))
+	} else if cfg.CostMedium > 0 && monthlyDelta >= cfg.CostMedium {
+		raise(Medium, fmt.Sprintf("estimated cost increase $%.2f/month", monthlyDelta))
+	}
+	if imports := s.Imports; imports > 0 {
+		raise(Medium, fmt.Sprintf("%d existing resource(s) imported", imports))
 	}
 	if s.Change > 0 {
 		raise(Medium, fmt.Sprintf("%d resource(s) changed in place", s.Change))
 	}
-	if total := s.Add + s.Change + s.Destroy + s.Replace; total > largeChange {
+	if total := s.Add + s.Change + s.Destroy + s.Replace; total > cfg.LargeChange {
 		raise(Medium, fmt.Sprintf("large change set (%d resources)", total))
 	}
 	var iam, net []string
@@ -85,17 +161,7 @@ func Classify(s policy.Summary, operation, tier string) Result {
 	if len(reasons) == 0 {
 		reasons = []string{"only additions in a non-production environment"}
 	}
-	return Result{Level: level, Reasons: reasons, Steps: StepsFor(level)}
-}
-
-func StepsFor(level string) []string {
-	switch level {
-	case High:
-		return []string{identity.StepManager, identity.StepFinOps, identity.StepSecurity}
-	case Medium:
-		return []string{identity.StepManager, identity.StepFinOps}
-	}
-	return []string{identity.StepManager}
+	return Result{Level: level, Reasons: reasons, Steps: append([]string(nil), cfg.Approvals[level]...)}
 }
 
 func rank(l string) int { return map[string]int{Low: 0, Medium: 1, High: 2}[l] }
