@@ -30,6 +30,8 @@ type Server struct {
 	CentralCAFile   string // CA to trust when fetching central's JWKS (optional)
 	CentralClientCA string // CA that signed central's mTLS client certificate
 	CentralJWKSFile string // static JWKS instead of fetching it (optional)
+
+	AllowLocalContracts bool // development only: contracts from a local directory
 }
 
 // Central configures the central plane: frontend, identity, tenant routing.
@@ -76,6 +78,8 @@ func LoadServer() (*Server, error) {
 		CentralCAFile:   os.Getenv("PRAVAHA_CENTRAL_CA_FILE"),
 		CentralClientCA: os.Getenv("PRAVAHA_CENTRAL_CLIENT_CA"),
 		CentralJWKSFile: os.Getenv("PRAVAHA_CENTRAL_JWKS_FILE"),
+
+		AllowLocalContracts: os.Getenv("PRAVAHA_ALLOW_LOCAL_CONTRACTS") == "1",
 	}
 	var errs []error
 	errs = append(errs, common(c.DatabaseURL, c.MasterKey, c.PublicURL, false)...)

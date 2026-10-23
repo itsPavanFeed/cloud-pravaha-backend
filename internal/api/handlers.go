@@ -314,6 +314,10 @@ func (s *Server) updateStack(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusForbidden, "editing stacks needs the developer or admin role in "+st.BU)
 		return
 	}
+	if st.ManagedBy == "git" {
+		writeErr(w, http.StatusConflict, "this stack is managed by the contracts repository; change it there")
+		return
+	}
 	var b struct {
 		Spec json.RawMessage `json:"spec"`
 	}

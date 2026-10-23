@@ -234,6 +234,8 @@ type Stack struct {
 	UpdatedAt     time.Time       `json:"updated_at"`
 	LastRun       *RunBrief       `json:"last_run,omitempty"`
 	Drift         DriftSettings   `json:"drift"`
+	ManagedBy     string          `json:"managed_by"`           // ui | git
+	SourceRef     string          `json:"source_ref,omitempty"` // contracts repo commit for Git-managed stacks
 }
 
 type DriftSettings struct {
@@ -250,7 +252,7 @@ type RunBrief struct {
 }
 
 const stackSelect = `SELECT s.id, s.name, s.bu, s.entity, s.environment_id, e.name, s.spec, s.created_by, s.created_at, s.updated_at,
-	s.drift_interval_minutes, s.drift_auto_remediate, s.last_drift_check,
+	s.drift_interval_minutes, s.drift_auto_remediate, s.last_drift_check, s.managed_by, s.source_ref,
 	lr.id, lr.status, lr.operation, lr.created_at
 	FROM stacks s JOIN environments e ON e.id = s.environment_id
 	LEFT JOIN LATERAL (SELECT id, status, operation, created_at FROM runs WHERE stack_id = s.id ORDER BY created_at DESC LIMIT 1) lr ON true`
@@ -260,7 +262,7 @@ func scanStack(r pgx.Row) (*Stack, error) {
 	var rid, rstatus, rop *string
 	var rat *time.Time
 	err := r.Scan(&x.ID, &x.Name, &x.BU, &x.Entity, &x.EnvironmentID, &x.Environment, &x.Spec, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt,
-		&x.Drift.IntervalMinutes, &x.Drift.AutoRemediate, &x.Drift.LastCheck, &rid, &rstatus, &rop, &rat)
+		&x.Drift.IntervalMinutes, &x.Drift.AutoRemediate, &x.Drift.LastCheck, &x.ManagedBy, &x.SourceRef, &rid, &rstatus, &rop, &rat)
 	if rid != nil {
 		x.LastRun = &RunBrief{ID: *rid, Status: *rstatus, Operation: *rop, CreatedAt: *rat}
 	}
@@ -268,9 +270,14 @@ func scanStack(r pgx.Row) (*Stack, error) {
 }
 
 func (s *Store) CreateStack(ctx context.Context, name, bu, entity, envID string, spec []byte, by string) (*Stack, error) {
+	return s.CreateManagedStack(ctx, name, bu, entity, envID, spec, by, "ui", "")
+}
+
+// CreateManagedStack creates a stack owned by the UI or by the contracts repository.
+func (s *Store) CreateManagedStack(ctx context.Context, name, bu, entity, envID string, spec []byte, by, managedBy, ref string) (*Stack, error) {
 	var id string
-	err := s.db.QueryRow(ctx, `INSERT INTO stacks (name, bu, entity, environment_id, spec, created_by) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-		name, bu, entity, envID, spec, by).Scan(&id)
+	err := s.db.QueryRow(ctx, `INSERT INTO stacks (name, bu, entity, environment_id, spec, created_by, managed_by, source_ref) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+		name, bu, entity, envID, spec, by, managedBy, ref).Scan(&id)
 	if IsUnique(err) {
 		return nil, ErrConflict
 	}
@@ -285,6 +292,17 @@ func (s *Store) CreateStack(ctx context.Context, name, bu, entity, envID string,
 func (s *Store) UpdateStack(ctx context.Context, id string, spec []byte) error {
 	tag, err := s.db.Exec(ctx, `UPDATE stacks SET spec = $2, updated_at = now() WHERE id = $1
 		AND NOT EXISTS (SELECT 1 FROM runs WHERE stack_id = $1 AND status IN ('queued','planning','planned','apply_queued','applying'))`, id, spec)
+	if err == nil && tag.RowsAffected() == 0 {
+		return ErrConflict
+	}
+	return err
+}
+
+// UpdateGitStack replaces a Git-managed stack's spec at a new commit (refused
+// while a run is active, like UpdateStack).
+func (s *Store) UpdateGitStack(ctx context.Context, id string, spec []byte, ref string) error {
+	tag, err := s.db.Exec(ctx, `UPDATE stacks SET spec = $2, source_ref = $3, updated_at = now() WHERE id = $1 AND managed_by = 'git'
+		AND NOT EXISTS (SELECT 1 FROM runs WHERE stack_id = $1 AND status IN ('queued','planning','planned','apply_queued','applying'))`, id, spec, ref)
 	if err == nil && tag.RowsAffected() == 0 {
 		return ErrConflict
 	}

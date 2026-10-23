@@ -225,6 +225,9 @@ func (s *Server) agentPlan(w http.ResponseWriter, r *http.Request) {
 		"policy_passed": res.Passed, "violations": len(res.Violations), "plan_sha256": up.SHA256, "state_serial": serial,
 		"risk": rk.Level, "required_approvals": rk.Steps, "monthly_cost_delta_usd": est.MonthlyDelta,
 	})
+	if status == "planned" {
+		s.autoApplyLowRisk(ctx, run, rk)
+	}
 	writeJSON(w, 200, map[string]any{"status": status, "risk": rk.Level, "required_approvals": rk.Steps})
 }
 

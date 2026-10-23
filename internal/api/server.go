@@ -93,6 +93,10 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/runs/{id}/discard", u(s.discardRun))
 	mux.Handle("GET /api/v1/audit", u(s.listAudit))
 	mux.Handle("GET /api/v1/audit/verify", u(s.verifyAudit))
+	mux.Handle("GET /api/v1/contracts", u(s.getContracts))
+	mux.Handle("PUT /api/v1/contracts", u(s.putContracts))
+	mux.Handle("PUT /api/v1/contracts/token", u(s.putContractsToken))
+	mux.Handle("POST /api/v1/contracts/sync", u(s.syncContractsNow))
 	mux.Handle("GET /api/v1/settings/risk", u(s.getRiskSettings))
 	mux.Handle("PUT /api/v1/settings/risk", u(s.putRiskSettings))
 	mux.Handle("GET /api/v1/runners", u(s.listRunners))
@@ -126,6 +130,7 @@ func (s *Server) Run(ctx context.Context) error {
 	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12, ClientAuth: tls.VerifyClientCertIfGiven, ClientCAs: pool}
 	go s.reaper(ctx)
 	go s.driftScheduler(ctx)
+	go s.contractsSyncer(ctx)
 	s.log.Info("tenant plane serving HTTPS", "tenant", s.cfg.Tenant, "listen", s.cfg.Listen, "central", s.cfg.CentralURL)
 	return httpx.Serve(ctx, s.log, s.cfg.Listen, s.Handler(), tlsCfg, s.cfg.TLSCert, s.cfg.TLSKey)
 }

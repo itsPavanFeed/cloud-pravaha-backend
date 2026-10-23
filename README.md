@@ -51,6 +51,17 @@ Cloud Pravaha is a multi-tenant OpenTofu platform that deploys only **pinned pub
   | medium | production environment, in-place changes, network resources, or more than 25 changes | manager + finops |
   | high | deletions or replacements, destroy runs, identity and access changes, or network exposure in production | manager + finops + security |
 
+## Git integration: contracts repositories
+
+Each tenant can keep its stacks as contracts in a Git branch (GitHub, GitLab, or self-hosted either), one JSON file per stack (`{"name","environment","spec"}`); see `cloud-pravaha-test-resources/contracts-example`. It works like this:
+
+- **Pull-based sync:** the tenant plane polls the branch, outbound only, and downloads a snapshot when the commit changes.
+- **Git-managed stacks:** it creates or updates stacks managed by Git, which can't be edited in the UI or API, and records the source commit.
+- **Automatic plans:** with `auto_plan`, a plan is queued for every new or changed contract. Plans keep the usual risk-based approvals. With `auto_apply_low_risk`, the system signs low-risk plans (non-production additions), recorded as `system:auto-deploy:<step>`.
+- **Problems are reported, not applied:** invalid contracts are reported per file. A contract can't take over a stack managed in the UI, and removed contracts are reported as orphaned, never destroyed automatically.
+
+API: `GET/PUT /contracts`, `PUT /contracts/token` (read-only token, sealed with the tenant master key, never returned), and `POST /contracts/sync`. The development-only `local` provider needs `PRAVAHA_ALLOW_LOCAL_CONTRACTS=1`.
+
 ## Backporting: importing existing resources
 
 A stack spec can list `imports`: an address inside one of the stack's catalog modules and the cloud ID of a resource that already exists. The platform generates OpenTofu `import` blocks, so the plan adopts those resources into the module's state instead of creating them.
@@ -196,7 +207,7 @@ See [SECURITY.md](SECURITY.md) for the security controls and how they map to com
 ## Roadmap
 
 This build covers the tenancy core of the platform design. Coming next:
-- Git integration and a contracts repository per tenant, with pull-based auto-deploy
+- Pull-request plans: speculative plans posted back to Git pull requests
 - Temporal workflows and per-tenant buckets
 - Resource discovery for backporting (listing a cloud account's resources to suggest imports)
 - LLM integration with RAG
