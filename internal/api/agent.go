@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -184,6 +185,10 @@ func (s *Server) agentPlan(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreErr(w, err, "")
 		return
 	}
+	if run.Operation == "drift" {
+		s.recordDrift(w, r, run, st, up)
+		return
+	}
 	res := policy.Evaluate(up.Summary, policy.Limits{MaxDestroys: env.MaxDestroys, AllowDestroy: env.AllowDestroy, Destroying: run.Operation == "destroy"})
 	status := "planned"
 	switch {
@@ -221,6 +226,76 @@ func (s *Server) agentPlan(w http.ResponseWriter, r *http.Request) {
 		"risk": rk.Level, "required_approvals": rk.Steps, "monthly_cost_delta_usd": est.MonthlyDelta,
 	})
 	writeJSON(w, 200, map[string]any{"status": status, "risk": rk.Level, "required_approvals": rk.Steps})
+}
+
+// recordDrift ends a refresh-only run as drifted or no_drift. Nothing is
+// applied; with auto-remediation a normal plan is queued, which then needs the
+// usual risk-based approvals.
+func (s *Server) recordDrift(w http.ResponseWriter, r *http.Request, run *store.Run, st *store.Stack, up planUpload) {
+	ctx := r.Context()
+	status := "no_drift"
+	if len(up.Summary.Drift) > 0 {
+		status = "drifted"
+	}
+	_, serial, _ := s.store.CurrentState(ctx, st.ID)
+	summary, _ := json.Marshal(up.Summary)
+	if err := s.store.SetPlanned(ctx, run.ID, store.Planned{Status: status, SHA256: up.SHA256, Summary: summary,
+		Policy: []byte(`{"passed":true,"violations":[]}`), Required: []string{}, Serial: serial}); err != nil {
+		s.writeStoreErr(w, err, "run is not planning")
+		return
+	}
+	var drifted []string
+	for _, d := range up.Summary.Drift {
+		drifted = append(drifted, d.Address)
+	}
+	s.audit(ctx, who(r).Subject(), "run.drift", "run/"+run.ID, run.BU, map[string]any{"stack": st.Name, "status": status, "resources": drifted})
+	if status == "drifted" && st.Drift.AutoRemediate {
+		if env, err := s.store.GetEnvironment(ctx, st.EnvironmentID); err == nil {
+			if gen, _, probs := s.build(ctx, st.Name, env, st.Spec); probs == nil {
+				if fix, err := s.store.CreateRun(ctx, st.ID, "apply", "system:drift-remediation", gen.Hash); err == nil {
+					s.audit(ctx, "system:drift-remediation", "run.create", "run/"+fix.ID, st.BU, map[string]string{"stack": st.Name, "operation": "apply", "reason": "drift found by run " + run.ID})
+					s.notify()
+				}
+			}
+		}
+	}
+	writeJSON(w, 200, map[string]any{"status": status, "drifted": drifted})
+}
+
+// driftScheduler queues refresh-only runs for stacks whose check is due.
+func (s *Server) driftScheduler(ctx context.Context) {
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		ids, err := s.store.DueForDrift(ctx)
+		if err != nil {
+			s.log.Error("drift scheduler", "err", err)
+			continue
+		}
+		for _, id := range ids {
+			st, err := s.store.GetStack(ctx, id)
+			if err != nil {
+				continue
+			}
+			env, err := s.store.GetEnvironment(ctx, st.EnvironmentID)
+			if err != nil {
+				continue
+			}
+			gen, _, probs := s.build(ctx, st.Name, env, st.Spec)
+			if probs != nil {
+				continue
+			}
+			if run, err := s.store.CreateRun(ctx, st.ID, "drift", "system:drift-schedule", gen.Hash); err == nil {
+				s.audit(ctx, "system:drift-schedule", "run.create", "run/"+run.ID, st.BU, map[string]string{"stack": st.Name, "operation": "drift"})
+				s.notify()
+			}
+		}
+	}
 }
 
 func planAAD(runID, sha string) []byte { return []byte("plan:" + runID + ":" + sha) }

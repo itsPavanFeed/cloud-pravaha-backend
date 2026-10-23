@@ -84,6 +84,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /api/v1/stacks/{id}", u(s.updateStack))
 	mux.Handle("GET /api/v1/stacks/{id}/runs", u(s.listStackRuns))
 	mux.Handle("POST /api/v1/stacks/{id}/runs", u(s.createRun))
+	mux.Handle("PUT /api/v1/stacks/{id}/drift", u(s.setDrift))
 	mux.Handle("GET /api/v1/stacks/{id}/state-versions", u(s.listStateVersions))
 	mux.Handle("GET /api/v1/runs", u(s.listRuns))
 	mux.Handle("GET /api/v1/runs/{id}", u(s.getRun))
@@ -124,6 +125,7 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12, ClientAuth: tls.VerifyClientCertIfGiven, ClientCAs: pool}
 	go s.reaper(ctx)
+	go s.driftScheduler(ctx)
 	s.log.Info("tenant plane serving HTTPS", "tenant", s.cfg.Tenant, "listen", s.cfg.Listen, "central", s.cfg.CentralURL)
 	return httpx.Serve(ctx, s.log, s.cfg.Listen, s.Handler(), tlsCfg, s.cfg.TLSCert, s.cfg.TLSKey)
 }

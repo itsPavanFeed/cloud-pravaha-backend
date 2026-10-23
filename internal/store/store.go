@@ -233,6 +233,13 @@ type Stack struct {
 	CreatedAt     time.Time       `json:"created_at"`
 	UpdatedAt     time.Time       `json:"updated_at"`
 	LastRun       *RunBrief       `json:"last_run,omitempty"`
+	Drift         DriftSettings   `json:"drift"`
+}
+
+type DriftSettings struct {
+	IntervalMinutes int        `json:"interval_minutes"` // 0 = no scheduled checks
+	AutoRemediate   bool       `json:"auto_remediate"`   // queue a corrective plan (still approved) when drift is found
+	LastCheck       *time.Time `json:"last_check,omitempty"`
 }
 
 type RunBrief struct {
@@ -243,6 +250,7 @@ type RunBrief struct {
 }
 
 const stackSelect = `SELECT s.id, s.name, s.bu, s.entity, s.environment_id, e.name, s.spec, s.created_by, s.created_at, s.updated_at,
+	s.drift_interval_minutes, s.drift_auto_remediate, s.last_drift_check,
 	lr.id, lr.status, lr.operation, lr.created_at
 	FROM stacks s JOIN environments e ON e.id = s.environment_id
 	LEFT JOIN LATERAL (SELECT id, status, operation, created_at FROM runs WHERE stack_id = s.id ORDER BY created_at DESC LIMIT 1) lr ON true`
@@ -251,7 +259,8 @@ func scanStack(r pgx.Row) (*Stack, error) {
 	var x Stack
 	var rid, rstatus, rop *string
 	var rat *time.Time
-	err := r.Scan(&x.ID, &x.Name, &x.BU, &x.Entity, &x.EnvironmentID, &x.Environment, &x.Spec, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt, &rid, &rstatus, &rop, &rat)
+	err := r.Scan(&x.ID, &x.Name, &x.BU, &x.Entity, &x.EnvironmentID, &x.Environment, &x.Spec, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt,
+		&x.Drift.IntervalMinutes, &x.Drift.AutoRemediate, &x.Drift.LastCheck, &rid, &rstatus, &rop, &rat)
 	if rid != nil {
 		x.LastRun = &RunBrief{ID: *rid, Status: *rstatus, Operation: *rop, CreatedAt: *rat}
 	}
@@ -293,6 +302,32 @@ func (s *Store) ListStacks(ctx context.Context, bus []string) ([]*Stack, error) 
 		return nil, err
 	}
 	return Collect(rows, scanStack)
+}
+
+func (s *Store) SetDrift(ctx context.Context, stackID string, d DriftSettings) error {
+	_, err := s.db.Exec(ctx, `UPDATE stacks SET drift_interval_minutes = $2, drift_auto_remediate = $3 WHERE id = $1`, stackID, d.IntervalMinutes, d.AutoRemediate)
+	return err
+}
+
+// DueForDrift returns stacks whose scheduled drift check is due and that have
+// no active run, marking them checked so concurrent schedulers skip them.
+func (s *Store) DueForDrift(ctx context.Context) ([]string, error) {
+	rows, err := s.db.Query(ctx, `UPDATE stacks SET last_drift_check = now()
+		WHERE drift_interval_minutes > 0
+		  AND (last_drift_check IS NULL OR last_drift_check < now() - make_interval(mins => drift_interval_minutes))
+		  AND NOT EXISTS (SELECT 1 FROM runs WHERE stack_id = stacks.id AND status IN ('queued','planning','planned','apply_queued','applying'))
+		RETURNING id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		rows.Scan(&id)
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 // ---- runs ----
@@ -357,7 +392,7 @@ func scanRun(r pgx.Row) (*Run, error) {
 }
 
 // Terminal run statuses.
-var Terminal = []string{"no_changes", "policy_failed", "applied", "failed", "discarded"}
+var Terminal = []string{"no_changes", "policy_failed", "applied", "failed", "discarded", "no_drift", "drifted"}
 
 func (s *Store) CreateRun(ctx context.Context, stackID, op, by, configHash string) (*Run, error) {
 	var id string
@@ -452,7 +487,7 @@ func (s *Store) Logs(ctx context.Context, runID string, after int64) ([]LogChunk
 
 // Planned is what a finished plan records.
 type Planned struct {
-	Status   string // planned | no_changes | policy_failed
+	Status   string // planned | no_changes | policy_failed | no_drift | drifted
 	Sealed   []byte
 	SHA256   string
 	Summary  []byte

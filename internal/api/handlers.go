@@ -338,6 +338,34 @@ func (s *Server) updateStack(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, st)
 }
 
+// setDrift configures scheduled drift checks for a stack.
+func (s *Server) setDrift(w http.ResponseWriter, r *http.Request) {
+	p := user(r)
+	st := s.visibleStack(w, r)
+	if st == nil {
+		return
+	}
+	if !p.CanChange(st.BU) {
+		writeErr(w, http.StatusForbidden, "drift settings need the developer or admin role in "+st.BU)
+		return
+	}
+	var d store.DriftSettings
+	if !decode(w, r, &d) {
+		return
+	}
+	if d.IntervalMinutes != 0 && (d.IntervalMinutes < 5 || d.IntervalMinutes > 7*24*60) {
+		writeErr(w, 422, "interval_minutes must be 0 (off) or between 5 and 10080")
+		return
+	}
+	if err := s.store.SetDrift(r.Context(), st.ID, d); err != nil {
+		s.writeStoreErr(w, err, "")
+		return
+	}
+	s.audit(r.Context(), p.Actor(), "stack.drift_settings", "stack/"+st.Name, st.BU, d)
+	st, _ = s.store.GetStack(r.Context(), st.ID)
+	writeJSON(w, 200, st)
+}
+
 func visible(r *http.Request) []string { return user(r).VisibleBUs() }
 
 func (s *Server) listStacks(w http.ResponseWriter, r *http.Request) {
@@ -389,8 +417,8 @@ func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
 	if b.Operation == "" {
 		b.Operation = "apply"
 	}
-	if b.Operation != "apply" && b.Operation != "destroy" {
-		writeErr(w, 422, `operation must be "apply" or "destroy"`)
+	if b.Operation != "apply" && b.Operation != "destroy" && b.Operation != "drift" {
+		writeErr(w, 422, `operation must be "apply", "destroy" or "drift"`)
 		return
 	}
 	env, err := s.store.GetEnvironment(r.Context(), st.EnvironmentID)

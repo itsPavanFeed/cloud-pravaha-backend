@@ -41,3 +41,18 @@ func TestSummarizeImports(t *testing.T) {
 		t.Fatalf("bad import summary: %+v", s)
 	}
 }
+
+func TestSummarizeDrift(t *testing.T) {
+	plan := `{"resource_drift":[
+	 {"address":"module.vpc.aws_security_group.this","type":"aws_security_group","mode":"managed","change":{"actions":["update"]}},
+	 {"address":"module.vpc.aws_subnet.a","type":"aws_subnet","mode":"managed","change":{"actions":["delete"]}},
+	 {"address":"data.aws_region.r","type":"aws_region","mode":"data","change":{"actions":["update"]}}
+	],"resource_changes":[]}`
+	s, err := Summarize([]byte(plan))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Drift) != 2 || s.HasChanges() {
+		t.Fatalf("drift: %+v", s)
+	}
+}

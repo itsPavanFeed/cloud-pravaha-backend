@@ -374,8 +374,11 @@ func (j *job) tofu(ctx context.Context, args ...string) error {
 
 func (j *job) plan(ctx context.Context) error {
 	args := []string{"plan", "-input=false", "-no-color", "-lock-timeout=60s", "-out=" + planFile}
-	if j.Operation == "destroy" {
+	switch j.Operation {
+	case "destroy":
 		args = append(args, "-destroy")
+	case "drift":
+		args = append(args, "-refresh-only") // compare real infrastructure with state; never changes anything
 	}
 	j.logs.Printf("==> tofu %s\n", strings.Join(args, " "))
 	if err := j.tofu(ctx, args...); err != nil {
@@ -397,7 +400,11 @@ func (j *job) plan(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	j.logs.Printf("==> plan: %d to add, %d to change, %d to destroy, %d to replace; uploading for policy checks\n", summary.Add, summary.Change, summary.Destroy, summary.Replace)
+	if j.Operation == "drift" {
+		j.logs.Printf("==> drift check: %d resource(s) changed outside OpenTofu\n", len(summary.Drift))
+	} else {
+		j.logs.Printf("==> plan: %d to add, %d to change, %d to destroy, %d to replace; uploading for policy checks\n", summary.Add, summary.Change, summary.Destroy, summary.Replace)
+	}
 	j.logs.Flush()
 	var res struct{ Status string }
 	if err := j.call(ctx, http.MethodPost, "/plan", map[string]any{"summary": summary, "plan": plan, "sha256": secure.SHA256Hex(plan)}, &res); err != nil {
@@ -455,7 +462,21 @@ func (j *job) call(ctx context.Context, method, path string, body, out any) erro
 
 // ---- plan summary ----
 
+type resourceChange struct {
+	Address string `json:"address"`
+	Type    string `json:"type"`
+	Mode    string `json:"mode"`
+	Change  struct {
+		Actions        []string `json:"actions"`
+		Importing      any      `json:"importing"`
+		After          any      `json:"after"`
+		AfterSensitive any      `json:"after_sensitive"`
+		AfterUnknown   any      `json:"after_unknown"`
+	} `json:"change"`
+}
+
 type planJSON struct {
+	ResourceDrift   []resourceChange `json:"resource_drift"`
 	ResourceChanges []struct {
 		Address string `json:"address"`
 		Type    string `json:"type"`
@@ -511,6 +532,12 @@ func Summarize(b []byte) (policy.Summary, error) {
 	}
 	for name := range p.OutputChanges {
 		s.Outputs = append(s.Outputs, name)
+	}
+	for _, rd := range p.ResourceDrift {
+		if rd.Mode == "data" || len(rd.Change.Actions) == 0 || rd.Change.Actions[0] == "no-op" {
+			continue
+		}
+		s.Drift = append(s.Drift, policy.ResourceChange{Address: rd.Address, Type: rd.Type, Actions: rd.Change.Actions})
 	}
 	return s, nil
 }

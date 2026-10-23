@@ -26,6 +26,9 @@ type Summary struct {
 	Imports   int              `json:"imports,omitempty"` // existing resources adopted into state
 	Resources []ResourceChange `json:"resources"`
 	Outputs   []string         `json:"outputs,omitempty"`
+	// Drift lists resources changed outside OpenTofu since the last apply
+	// (from a refresh-only plan's resource_drift).
+	Drift []ResourceChange `json:"drift,omitempty"`
 }
 
 func (s *Summary) HasChanges() bool { return s.Add+s.Change+s.Destroy+s.Replace+s.Imports > 0 }

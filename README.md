@@ -61,6 +61,12 @@ A stack spec can list `imports`: an address inside one of the stack's catalog mo
 
 Imports raise risk to at least medium. A new hard policy rule, `import-destroys`, blocks any import the plan would delete or replace. That happens when the module's inputs don't match the existing resource; fix the inputs and plan again.
 
+## Drift detection
+
+A drift run (`{"operation":"drift"}`) is a refresh-only plan. It compares real infrastructure with state and ends as `no_drift` or `drifted`, listing the resources changed outside OpenTofu. It never changes anything and needs no approvals.
+
+Each stack can schedule checks (`PUT /stacks/{id}/drift` with `{"interval_minutes": 60, "auto_remediate": true}`; minimum 5 minutes). With auto-remediation, a drifted check queues a normal plan, which still goes through the risk-based approval chain.
+
 ## How a change flows
 
 1. **Spec.** A developer submits a stack spec listing catalog modules, literal inputs and `{"$ref": "module.output"}` wiring. Anything outside the catalog, version ranges, `${…}`/`%{…}` templates and unknown fields are rejected.
