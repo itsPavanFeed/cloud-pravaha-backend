@@ -1,6 +1,7 @@
 // Package store is the PostgreSQL persistence layer. Store is a tenant plane's
-// database: environments, stacks, runs, approvals, state and the audit log of
-// one tenant, every row scoped to an entity (business unit).
+// database: cloud connections, environments, stacks, runs, approvals, state and
+// the audit log of one tenant. Rows are scoped to a business unit (BU) and also
+// record the BU's entity.
 package store
 
 import (
@@ -25,7 +26,7 @@ func Open(ctx context.Context, url string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Store{Base{db: db}}, nil
+	return &Store{Base{db: db, scopeCol: "bu"}}, nil
 }
 
 func (s *Store) Migrate(ctx context.Context) error {
@@ -33,12 +34,12 @@ func (s *Store) Migrate(ctx context.Context) error {
 	return Migrate(ctx, s.db, sub)
 }
 
-// entityFilter returns a SQL condition on col for a visible-entities list (nil = all).
-func entityFilter(col string, entities []string, args *[]any) string {
-	if entities == nil {
+// buFilter returns a SQL condition on col for a visible-BUs list (nil = all).
+func buFilter(col string, bus []string, args *[]any) string {
+	if bus == nil {
 		return "true"
 	}
-	*args = append(*args, entities)
+	*args = append(*args, bus)
 	return fmt.Sprintf("%s = ANY($%d)", col, len(*args))
 }
 
@@ -90,13 +91,77 @@ func (s *Store) RevokeRunner(ctx context.Context, id string) error {
 	return err
 }
 
+// ---- cloud connections (tenant-wide) ----
+
+// Connection is a cloud account, project or subscription registered once per
+// tenant. It holds identifiers only; Entities limits which entities may use it.
+type Connection struct {
+	ID        string          `json:"id"`
+	Name      string          `json:"name"`
+	Cloud     json.RawMessage `json:"cloud"`
+	Entities  []string        `json:"entities"` // empty = every entity
+	CreatedBy string          `json:"created_by"`
+	CreatedAt time.Time       `json:"created_at"`
+	UpdatedAt time.Time       `json:"updated_at"`
+}
+
+const connCols = `id, name, cloud, entities, created_by, created_at, updated_at`
+
+func scanConn(r pgx.Row) (*Connection, error) {
+	var c Connection
+	err := r.Scan(&c.ID, &c.Name, &c.Cloud, &c.Entities, &c.CreatedBy, &c.CreatedAt, &c.UpdatedAt)
+	if c.Entities == nil {
+		c.Entities = []string{}
+	}
+	return &c, NotFound(err)
+}
+
+// Allows reports whether an entity may use the connection.
+func (c *Connection) Allows(entity string) bool {
+	if len(c.Entities) == 0 {
+		return true
+	}
+	return containsStr(c.Entities, entity)
+}
+
+func (s *Store) CreateConnection(ctx context.Context, c *Connection) (*Connection, error) {
+	out, err := scanConn(s.db.QueryRow(ctx, `INSERT INTO cloud_connections (name, cloud, entities, created_by) VALUES ($1, $2, $3, $4) RETURNING `+connCols,
+		c.Name, c.Cloud, c.Entities, c.CreatedBy))
+	if IsUnique(err) {
+		return nil, ErrConflict
+	}
+	return out, err
+}
+
+func (s *Store) UpdateConnection(ctx context.Context, c *Connection) (*Connection, error) {
+	return scanConn(s.db.QueryRow(ctx, `UPDATE cloud_connections SET cloud = $2, entities = $3, updated_at = now() WHERE id = $1 RETURNING `+connCols,
+		c.ID, c.Cloud, c.Entities))
+}
+
+func (s *Store) GetConnection(ctx context.Context, idOrName string) (*Connection, error) {
+	return scanConn(s.db.QueryRow(ctx, `SELECT `+connCols+` FROM cloud_connections WHERE id::text = $1 OR name = $1`, idOrName))
+}
+
+func (s *Store) ListConnections(ctx context.Context) ([]*Connection, error) {
+	rows, err := s.db.Query(ctx, `SELECT `+connCols+` FROM cloud_connections ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	return Collect(rows, scanConn)
+}
+
 // ---- environments ----
 
+// Environment is a deployment target inside a BU: a cloud connection (or none)
+// plus a tier and guardrails. Cloud is read from the connection.
 type Environment struct {
 	ID           string          `json:"id"`
 	Name         string          `json:"name"`
+	BU           string          `json:"bu"`
 	Entity       string          `json:"entity"`
 	Tier         string          `json:"tier"`
+	ConnectionID *string         `json:"connection_id,omitempty"`
+	Connection   string          `json:"connection,omitempty"`
 	Cloud        json.RawMessage `json:"cloud"`
 	RunnerPool   string          `json:"runner_pool"`
 	MaxDestroys  int             `json:"max_destroys"`
@@ -106,35 +171,48 @@ type Environment struct {
 	UpdatedAt    time.Time       `json:"updated_at"`
 }
 
-const envCols = `id, name, entity, tier, cloud, runner_pool, max_destroys, allow_destroy, created_by, created_at, updated_at`
+const envSelect = `SELECT e.id, e.name, e.bu, e.entity, e.tier, e.connection_id, COALESCE(c.name, ''),
+	COALESCE(c.cloud, '{"provider":"none"}'::jsonb), e.runner_pool, e.max_destroys, e.allow_destroy, e.created_by, e.created_at, e.updated_at
+	FROM environments e LEFT JOIN cloud_connections c ON c.id = e.connection_id`
 
 func scanEnv(r pgx.Row) (*Environment, error) {
 	var e Environment
-	err := r.Scan(&e.ID, &e.Name, &e.Entity, &e.Tier, &e.Cloud, &e.RunnerPool, &e.MaxDestroys, &e.AllowDestroy, &e.CreatedBy, &e.CreatedAt, &e.UpdatedAt)
+	err := r.Scan(&e.ID, &e.Name, &e.BU, &e.Entity, &e.Tier, &e.ConnectionID, &e.Connection, &e.Cloud, &e.RunnerPool, &e.MaxDestroys, &e.AllowDestroy, &e.CreatedBy, &e.CreatedAt, &e.UpdatedAt)
 	return &e, NotFound(err)
 }
 
 func (s *Store) CreateEnvironment(ctx context.Context, e *Environment) (*Environment, error) {
-	out, err := scanEnv(s.db.QueryRow(ctx, `INSERT INTO environments (name, entity, tier, cloud, runner_pool, max_destroys, allow_destroy, created_by)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING `+envCols, e.Name, e.Entity, e.Tier, e.Cloud, e.RunnerPool, e.MaxDestroys, e.AllowDestroy, e.CreatedBy))
+	var id string
+	err := s.db.QueryRow(ctx, `INSERT INTO environments (name, bu, entity, tier, connection_id, runner_pool, max_destroys, allow_destroy, created_by)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`, e.Name, e.BU, e.Entity, e.Tier, e.ConnectionID, e.RunnerPool, e.MaxDestroys, e.AllowDestroy, e.CreatedBy).Scan(&id)
 	if IsUnique(err) {
 		return nil, ErrConflict
 	}
-	return out, err
+	if err != nil {
+		return nil, err
+	}
+	return s.GetEnvironment(ctx, id)
 }
 
 func (s *Store) UpdateEnvironment(ctx context.Context, e *Environment) (*Environment, error) {
-	return scanEnv(s.db.QueryRow(ctx, `UPDATE environments SET tier = $2, cloud = $3, runner_pool = $4, max_destroys = $5, allow_destroy = $6, updated_at = now()
-		WHERE id = $1 RETURNING `+envCols, e.ID, e.Tier, e.Cloud, e.RunnerPool, e.MaxDestroys, e.AllowDestroy))
+	tag, err := s.db.Exec(ctx, `UPDATE environments SET tier = $2, connection_id = $3, runner_pool = $4, max_destroys = $5, allow_destroy = $6, updated_at = now()
+		WHERE id = $1`, e.ID, e.Tier, e.ConnectionID, e.RunnerPool, e.MaxDestroys, e.AllowDestroy)
+	if err == nil && tag.RowsAffected() == 0 {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return s.GetEnvironment(ctx, e.ID)
 }
 
 func (s *Store) GetEnvironment(ctx context.Context, idOrName string) (*Environment, error) {
-	return scanEnv(s.db.QueryRow(ctx, `SELECT `+envCols+` FROM environments WHERE id::text = $1 OR name = $1`, idOrName))
+	return scanEnv(s.db.QueryRow(ctx, envSelect+` WHERE e.id::text = $1 OR e.name = $1`, idOrName))
 }
 
-func (s *Store) ListEnvironments(ctx context.Context, entities []string) ([]*Environment, error) {
+func (s *Store) ListEnvironments(ctx context.Context, bus []string) ([]*Environment, error) {
 	args := []any{}
-	rows, err := s.db.Query(ctx, `SELECT `+envCols+` FROM environments WHERE `+entityFilter("entity", entities, &args)+` ORDER BY entity, name`, args...)
+	rows, err := s.db.Query(ctx, envSelect+` WHERE `+buFilter("e.bu", bus, &args)+` ORDER BY e.entity, e.bu, e.name`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -146,6 +224,7 @@ func (s *Store) ListEnvironments(ctx context.Context, entities []string) ([]*Env
 type Stack struct {
 	ID            string          `json:"id"`
 	Name          string          `json:"name"`
+	BU            string          `json:"bu"`
 	Entity        string          `json:"entity"`
 	EnvironmentID string          `json:"environment_id"`
 	Environment   string          `json:"environment"`
@@ -163,7 +242,7 @@ type RunBrief struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-const stackSelect = `SELECT s.id, s.name, s.entity, s.environment_id, e.name, s.spec, s.created_by, s.created_at, s.updated_at,
+const stackSelect = `SELECT s.id, s.name, s.bu, s.entity, s.environment_id, e.name, s.spec, s.created_by, s.created_at, s.updated_at,
 	lr.id, lr.status, lr.operation, lr.created_at
 	FROM stacks s JOIN environments e ON e.id = s.environment_id
 	LEFT JOIN LATERAL (SELECT id, status, operation, created_at FROM runs WHERE stack_id = s.id ORDER BY created_at DESC LIMIT 1) lr ON true`
@@ -172,17 +251,17 @@ func scanStack(r pgx.Row) (*Stack, error) {
 	var x Stack
 	var rid, rstatus, rop *string
 	var rat *time.Time
-	err := r.Scan(&x.ID, &x.Name, &x.Entity, &x.EnvironmentID, &x.Environment, &x.Spec, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt, &rid, &rstatus, &rop, &rat)
+	err := r.Scan(&x.ID, &x.Name, &x.BU, &x.Entity, &x.EnvironmentID, &x.Environment, &x.Spec, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt, &rid, &rstatus, &rop, &rat)
 	if rid != nil {
 		x.LastRun = &RunBrief{ID: *rid, Status: *rstatus, Operation: *rop, CreatedAt: *rat}
 	}
 	return &x, NotFound(err)
 }
 
-func (s *Store) CreateStack(ctx context.Context, name, entity, envID string, spec []byte, by string) (*Stack, error) {
+func (s *Store) CreateStack(ctx context.Context, name, bu, entity, envID string, spec []byte, by string) (*Stack, error) {
 	var id string
-	err := s.db.QueryRow(ctx, `INSERT INTO stacks (name, entity, environment_id, spec, created_by) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-		name, entity, envID, spec, by).Scan(&id)
+	err := s.db.QueryRow(ctx, `INSERT INTO stacks (name, bu, entity, environment_id, spec, created_by) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+		name, bu, entity, envID, spec, by).Scan(&id)
 	if IsUnique(err) {
 		return nil, ErrConflict
 	}
@@ -207,9 +286,9 @@ func (s *Store) GetStack(ctx context.Context, idOrName string) (*Stack, error) {
 	return scanStack(s.db.QueryRow(ctx, stackSelect+` WHERE s.id::text = $1 OR s.name = $1`, idOrName))
 }
 
-func (s *Store) ListStacks(ctx context.Context, entities []string) ([]*Stack, error) {
+func (s *Store) ListStacks(ctx context.Context, bus []string) ([]*Stack, error) {
 	args := []any{}
-	rows, err := s.db.Query(ctx, stackSelect+` WHERE `+entityFilter("s.entity", entities, &args)+` ORDER BY s.entity, s.name`, args...)
+	rows, err := s.db.Query(ctx, stackSelect+` WHERE `+buFilter("s.bu", bus, &args)+` ORDER BY s.entity, s.bu, s.name`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -229,6 +308,7 @@ type Run struct {
 	ID                string          `json:"id"`
 	StackID           string          `json:"stack_id"`
 	StackName         string          `json:"stack"`
+	BU                string          `json:"bu"`
 	Entity            string          `json:"entity"`
 	Environment       string          `json:"environment"`
 	Operation         string          `json:"operation"`
@@ -251,7 +331,7 @@ type Run struct {
 	FinishedAt        *time.Time      `json:"finished_at,omitempty"`
 }
 
-const runSelect = `SELECT r.id, r.stack_id, s.name, s.entity, e.name, r.operation, r.status, r.created_by,
+const runSelect = `SELECT r.id, r.stack_id, s.name, s.bu, s.entity, e.name, r.operation, r.status, r.created_by,
 	r.config_hash, r.state_serial, r.plan_sha256, r.plan_summary, r.policy_result, r.risk, r.cost, r.required_approvals, r.error, r.runner_id,
 	r.created_at, r.updated_at, r.planned_at, r.finished_at,
 	COALESCE((SELECT json_agg(json_build_object('step', a.step, 'approver', a.approver, 'reason', a.reason, 'created_at', a.created_at) ORDER BY a.created_at)
@@ -261,7 +341,7 @@ const runSelect = `SELECT r.id, r.stack_id, s.name, s.entity, e.name, r.operatio
 func scanRun(r pgx.Row) (*Run, error) {
 	var x Run
 	var approvals []byte
-	err := r.Scan(&x.ID, &x.StackID, &x.StackName, &x.Entity, &x.Environment, &x.Operation, &x.Status, &x.CreatedBy,
+	err := r.Scan(&x.ID, &x.StackID, &x.StackName, &x.BU, &x.Entity, &x.Environment, &x.Operation, &x.Status, &x.CreatedBy,
 		&x.ConfigHash, &x.StateSerial, &x.PlanSHA256, &x.PlanSummary, &x.PolicyResult, &x.Risk, &x.Cost, &x.RequiredApprovals, &x.Error, &x.RunnerID,
 		&x.CreatedAt, &x.UpdatedAt, &x.PlannedAt, &x.FinishedAt, &approvals)
 	if err == nil {
@@ -296,9 +376,9 @@ func (s *Store) GetRun(ctx context.Context, id string) (*Run, error) {
 	return scanRun(s.db.QueryRow(ctx, runSelect+` WHERE r.id::text = $1`, id))
 }
 
-func (s *Store) ListRuns(ctx context.Context, stackID string, entities []string, limit int) ([]*Run, error) {
+func (s *Store) ListRuns(ctx context.Context, stackID string, bus []string, limit int) ([]*Run, error) {
 	args := []any{limit}
-	where := entityFilter("s.entity", entities, &args)
+	where := buFilter("s.bu", bus, &args)
 	if stackID != "" {
 		args = append(args, stackID)
 		where += fmt.Sprintf(` AND r.stack_id::text = $%d`, len(args))

@@ -91,6 +91,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/tenants/{tenant}/health", a(s.tenantHealth))
 	mux.Handle("GET /api/v1/tenants/{tenant}/entities", a(s.listEntities))
 	mux.Handle("POST /api/v1/tenants/{tenant}/entities", a(s.createEntity))
+	mux.Handle("GET /api/v1/tenants/{tenant}/bus", a(s.listBUs))
+	mux.Handle("POST /api/v1/tenants/{tenant}/bus", a(s.createBU))
 	mux.Handle("GET /api/v1/tenants/{tenant}/members", a(s.listMembers))
 	mux.Handle("POST /api/v1/tenants/{tenant}/members", a(s.addMember))
 	mux.Handle("DELETE /api/v1/tenants/{tenant}/members/{id}", a(s.removeMember))
@@ -209,7 +211,14 @@ type meTenant struct {
 type meEntity struct {
 	Slug  string   `json:"slug"`
 	Name  string   `json:"name"`
-	Roles []string `json:"roles"`
+	Roles []string `json:"roles"` // granted on the entity (inherited by its BUs)
+	BUs   []meBU   `json:"bus"`
+}
+
+type meBU struct {
+	Slug  string   `json:"slug"`
+	Name  string   `json:"name"`
+	Roles []string `json:"roles"` // effective in this BU
 }
 
 func (s *Server) me(w http.ResponseWriter, r *http.Request) {
@@ -239,18 +248,32 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		ents, _ := s.store.Entities(r.Context(), t.ID)
+		bus, _ := s.store.BUs(r.Context(), t.ID)
 		mt := meTenant{Slug: t.Slug, Name: t.Name, TenantRoles: p.TenantRoles, PlatformAdmin: p.PlatformAdmin, Entities: []meEntity{}}
 		for _, e := range ents {
-			if roles := p.EntityRoles[e.Slug]; len(roles) > 0 || p.SeesAllEntities() {
-				if roles == nil {
-					roles = []string{}
+			me := meEntity{Slug: e.Slug, Name: e.Name, Roles: orEmpty(p.EntityRoles[e.Slug]), BUs: []meBU{}}
+			for _, b := range bus {
+				if b.Entity != e.Slug {
+					continue
 				}
-				mt.Entities = append(mt.Entities, meEntity{Slug: e.Slug, Name: e.Name, Roles: roles})
+				if roles := p.BURoles[b.Slug]; len(roles) > 0 || p.SeesAllBUs() {
+					me.BUs = append(me.BUs, meBU{Slug: b.Slug, Name: b.Name, Roles: orEmpty(roles)})
+				}
+			}
+			if len(me.BUs) > 0 || len(me.Roles) > 0 || p.SeesAllBUs() {
+				mt.Entities = append(mt.Entities, me)
 			}
 		}
 		tenants = append(tenants, mt)
 	}
 	httpx.WriteJSON(w, 200, map[string]any{"user": u, "tenants": tenants})
+}
+
+func orEmpty(xs []string) []string {
+	if xs == nil {
+		return []string{}
+	}
+	return xs
 }
 
 func (s *Server) listOwnTokens(w http.ResponseWriter, r *http.Request) {
@@ -387,7 +410,7 @@ func (s *Server) onboardTenant(w http.ResponseWriter, r *http.Request) {
 	}
 	admin, err := s.store.EnsureUser(r.Context(), b.AdminEmail, "", false, by)
 	if err == nil {
-		_, err = s.store.AddMembership(r.Context(), admin.ID, t.ID, nil, identity.TenantAdmin, by)
+		_, err = s.store.AddMembership(r.Context(), admin.ID, t.ID, nil, nil, identity.TenantAdmin, by)
 	}
 	if err != nil {
 		s.storeErr(w, err, "")
@@ -501,6 +524,47 @@ func (s *Server) createEntity(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, 201, e)
 }
 
+func (s *Server) listBUs(w http.ResponseWriter, r *http.Request) {
+	t, _ := s.tenantFor(w, r, false)
+	if t == nil {
+		return
+	}
+	bs, err := s.store.BUs(r.Context(), t.ID)
+	if err != nil {
+		s.storeErr(w, err, "")
+		return
+	}
+	httpx.WriteJSON(w, 200, bs)
+}
+
+// createBU adds a business unit (a product) under an entity.
+func (s *Server) createBU(w http.ResponseWriter, r *http.Request) {
+	t, _ := s.tenantFor(w, r, true)
+	if t == nil {
+		return
+	}
+	var b struct{ Slug, Name, Entity string }
+	if !httpx.Decode(w, r, &b) {
+		return
+	}
+	if !identity.SlugRe.MatchString(b.Slug) || !nameRe.MatchString(b.Name) {
+		httpx.WriteErr(w, 422, "slug must be lowercase letters, digits and dashes (2-32) and name is required")
+		return
+	}
+	e, err := s.store.Entity(r.Context(), t.ID, b.Entity)
+	if err != nil {
+		httpx.WriteErr(w, 422, "unknown entity "+b.Entity)
+		return
+	}
+	bu, err := s.store.CreateBU(r.Context(), t.ID, e.ID, b.Slug, b.Name, current(r).Email)
+	if err != nil {
+		s.storeErr(w, err, "a business unit with that slug exists")
+		return
+	}
+	s.audit(r.Context(), current(r).Email, "bu.create", "bu/"+bu.Slug, t.Slug, bu)
+	httpx.WriteJSON(w, 201, bu)
+}
+
 func (s *Server) listMembers(w http.ResponseWriter, r *http.Request) {
 	t, _ := s.tenantFor(w, r, true)
 	if t == nil {
@@ -519,7 +583,7 @@ func (s *Server) addMember(w http.ResponseWriter, r *http.Request) {
 	if t == nil {
 		return
 	}
-	var b struct{ Email, Name, Entity, Role string }
+	var b struct{ Email, Name, Entity, BU, Role string }
 	if !httpx.Decode(w, r, &b) {
 		return
 	}
@@ -527,18 +591,26 @@ func (s *Server) addMember(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteErr(w, 422, "email is invalid")
 		return
 	}
-	var entityID *string
+	var entityID, buID *string
+	scopeErr := "tenant-wide roles are " + strings.Join(identity.TenantRoles, ", ") + "; entity and business-unit roles are " + strings.Join(identity.ScopedRoles, ", ") + "; give at most one of entity or bu"
 	switch {
-	case b.Entity == "" && identity.IsTenantRole(b.Role):
-	case b.Entity != "" && identity.IsEntityRole(b.Role):
+	case b.Entity == "" && b.BU == "" && identity.IsTenantRole(b.Role):
+	case b.Entity != "" && b.BU == "" && identity.IsScopedRole(b.Role):
 		e, err := s.store.Entity(r.Context(), t.ID, b.Entity)
 		if err != nil {
 			httpx.WriteErr(w, 422, "unknown entity "+b.Entity)
 			return
 		}
 		entityID = &e.ID
+	case b.BU != "" && b.Entity == "" && identity.IsScopedRole(b.Role):
+		bu, err := s.store.BUBySlug(r.Context(), t.ID, b.BU)
+		if err != nil {
+			httpx.WriteErr(w, 422, "unknown business unit "+b.BU)
+			return
+		}
+		buID = &bu.ID
 	default:
-		httpx.WriteErr(w, 422, "tenant-wide roles are "+strings.Join(identity.TenantRoles, ", ")+"; entity roles are "+strings.Join(identity.EntityRoles, ", "))
+		httpx.WriteErr(w, 422, scopeErr)
 		return
 	}
 	u, err := s.store.EnsureUser(r.Context(), b.Email, b.Name, false, current(r).Email)
@@ -546,7 +618,7 @@ func (s *Server) addMember(w http.ResponseWriter, r *http.Request) {
 		s.storeErr(w, err, "")
 		return
 	}
-	m, err := s.store.AddMembership(r.Context(), u.ID, t.ID, entityID, b.Role, current(r).Email)
+	m, err := s.store.AddMembership(r.Context(), u.ID, t.ID, entityID, buID, b.Role, current(r).Email)
 	if err != nil {
 		s.storeErr(w, err, "that membership exists")
 		return

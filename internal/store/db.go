@@ -81,9 +81,13 @@ func Migrate(ctx context.Context, db *pgxpool.Pool, fsys fs.FS) error {
 // Base holds what both planes' databases share: key/value metadata (sealed
 // signing keys) and the hash-chained audit log. Both schemas define
 // schema_meta and audit_events identically.
-type Base struct{ db *pgxpool.Pool }
+type Base struct {
+	db       *pgxpool.Pool
+	scopeCol string // audit_events column holding the event's scope
+}
 
-func NewBase(db *pgxpool.Pool) Base { return Base{db: db} }
+// NewBase is for the central schema, where audit events are scoped by tenant slug.
+func NewBase(db *pgxpool.Pool) Base { return Base{db: db, scopeCol: "entity"} }
 
 func (b *Base) Close()              { b.db.Close() }
 func (b *Base) Pool() *pgxpool.Pool { return b.db }
@@ -116,7 +120,7 @@ func (b *Base) PutMetaIfAbsent(ctx context.Context, key string, v []byte) ([]byt
 
 // AppendAudit adds an event to the hash chain. A transaction-scoped advisory
 // lock serialises writers so the chain never forks.
-func (b *Base) AppendAudit(ctx context.Context, actor, action, target, entity string, payload any) error {
+func (b *Base) AppendAudit(ctx context.Context, actor, action, target, scope string, payload any) error {
 	p, err := json.Marshal(payload)
 	if err != nil {
 		return err
@@ -133,29 +137,29 @@ func (b *Base) AppendAudit(ctx context.Context, actor, action, target, entity st
 	if err := tx.QueryRow(ctx, `SELECT hash FROM audit_events ORDER BY id DESC LIMIT 1`).Scan(&prev); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return err
 	}
-	e := audit.Event{TS: time.Now(), Actor: actor, Action: action, Target: target, Entity: entity, Payload: p}
+	e := audit.Event{TS: time.Now(), Actor: actor, Action: action, Target: target, Scope: scope, Payload: p}
 	audit.Normalize(&e)
 	h := audit.Hash(prev, e)
-	if _, err := tx.Exec(ctx, `INSERT INTO audit_events (ts, actor, action, target, entity, payload, prev_hash, hash) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-		e.TS, actor, action, target, entity, string(e.Payload), prev, h); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO audit_events (ts, actor, action, target, `+b.scopeCol+`, payload, prev_hash, hash) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		e.TS, actor, action, target, scope, string(e.Payload), prev, h); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
 }
 
 type AuditQuery struct {
-	Before   int64
-	Limit    int
-	Filter   string
-	Entities []string // nil = every event; otherwise these entities' events only
+	Before int64
+	Limit  int
+	Filter string
+	Scopes []string // nil = every event; otherwise events in these scopes only
 }
 
 func (b *Base) ListAudit(ctx context.Context, q AuditQuery) ([]audit.Event, error) {
-	sql := `SELECT id, ts, actor, action, target, entity, payload::text, prev_hash, hash FROM audit_events WHERE ($1 = 0 OR id < $1)`
+	sql := `SELECT id, ts, actor, action, target, ` + b.scopeCol + `, payload::text, prev_hash, hash FROM audit_events WHERE ($1 = 0 OR id < $1)`
 	args := []any{q.Before, q.Limit}
-	if q.Entities != nil {
-		args = append(args, q.Entities)
-		sql += fmt.Sprintf(` AND entity = ANY($%d)`, len(args))
+	if q.Scopes != nil {
+		args = append(args, q.Scopes)
+		sql += fmt.Sprintf(` AND `+b.scopeCol+` = ANY($%d)`, len(args))
 	}
 	if q.Filter != "" {
 		args = append(args, "%"+strings.NewReplacer("%", "", "_", "").Replace(q.Filter)+"%")
@@ -173,7 +177,7 @@ func (b *Base) VerifyAudit(ctx context.Context) (checked int, broken int64, err 
 	prev := audit.Genesis
 	var after int64
 	for {
-		rows, err := b.db.Query(ctx, `SELECT id, ts, actor, action, target, entity, payload::text, prev_hash, hash FROM audit_events WHERE id > $1 ORDER BY id LIMIT 5000`, after)
+		rows, err := b.db.Query(ctx, `SELECT id, ts, actor, action, target, `+b.scopeCol+`, payload::text, prev_hash, hash FROM audit_events WHERE id > $1 ORDER BY id LIMIT 5000`, after)
 		if err != nil {
 			return checked, 0, err
 		}
@@ -199,7 +203,7 @@ func scanAudit(rows pgx.Rows) ([]audit.Event, error) {
 	for rows.Next() {
 		var e audit.Event
 		var p string
-		if err := rows.Scan(&e.ID, &e.TS, &e.Actor, &e.Action, &e.Target, &e.Entity, &p, &e.PrevHash, &e.Hash); err != nil {
+		if err := rows.Scan(&e.ID, &e.TS, &e.Actor, &e.Action, &e.Target, &e.Scope, &p, &e.PrevHash, &e.Hash); err != nil {
 			return nil, err
 		}
 		e.Payload = json.RawMessage(p)

@@ -25,7 +25,9 @@ func TestAssertion(t *testing.T) {
 	iss, av := setup(t)
 	now := time.Now()
 	p := &Principal{Subject: "alice@acme", Tenant: "acme", TenantRoles: []string{"finops", "bogus"},
-		EntityRoles: map[string][]string{"payments": {"developer", "root"}, "Bad Slug": {"admin"}}}
+		EntityRoles: map[string][]string{"retail": {"viewer"}},
+		BURoles:     map[string][]string{"payments": {"developer", "root"}, "Bad Slug": {"admin"}},
+		BUEntity:    map[string]string{"payments": "retail", "data": "platform"}}
 	tok, _ := SignAssertion(iss, p, "GET", "/api/v1/stacks", now)
 
 	got, err := av.Verify(tok, "GET", "/api/v1/stacks", now)
@@ -33,13 +35,13 @@ func TestAssertion(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got.Subject != "alice@acme" || !got.HasTenantRole("finops") || got.HasTenantRole("bogus") ||
-		!got.HasEntityRole("payments", "developer") || got.HasEntityRole("payments", "root") || len(got.EntityRoles["Bad Slug"]) > 0 {
+		!got.HasBURole("payments", "developer") || got.HasBURole("payments", "root") || len(got.BURoles["Bad Slug"]) > 0 ||
+		got.EntityOf("payments") != "retail" || !got.KnownBU("data") || got.EntityRoles["retail"][0] != "viewer" {
 		t.Fatalf("unexpected principal: %+v", got)
 	}
 	if _, err := av.Verify(tok, "GET", "/api/v1/stacks", now); err == nil || !strings.Contains(err.Error(), "replayed") {
 		t.Fatalf("replay must be rejected, got %v", err)
 	}
-
 	tok2, _ := SignAssertion(iss, p, "GET", "/api/v1/stacks", now)
 	if _, err := av.Verify(tok2, "POST", "/api/v1/runs/x/approve", now); err == nil {
 		t.Fatal("an assertion must not authorise a different request")
@@ -48,8 +50,7 @@ func TestAssertion(t *testing.T) {
 	if _, err := av.Verify(tok3, "GET", "/api/v1/stacks", now.Add(2*time.Minute)); err == nil {
 		t.Fatal("expired assertion accepted")
 	}
-	other := &Principal{Subject: "x", Tenant: "globex"}
-	tok4, _ := SignAssertion(iss, other, "GET", "/api/v1/stacks", now)
+	tok4, _ := SignAssertion(iss, &Principal{Subject: "x", Tenant: "globex"}, "GET", "/api/v1/stacks", now)
 	if _, err := av.Verify(tok4, "GET", "/api/v1/stacks", now); err == nil {
 		t.Fatal("assertion for another tenant accepted")
 	}
@@ -61,20 +62,20 @@ func TestAssertion(t *testing.T) {
 }
 
 func TestPermissions(t *testing.T) {
-	dev := &Principal{EntityRoles: map[string][]string{"payments": {"developer"}}}
-	mgr := &Principal{EntityRoles: map[string][]string{"payments": {"manager"}}}
+	dev := &Principal{BURoles: map[string][]string{"payments": {"developer"}}}
+	mgr := &Principal{BURoles: map[string][]string{"payments": {"manager"}}}
 	fin := &Principal{TenantRoles: []string{"finops"}}
 	if !dev.CanChange("payments") || dev.CanChange("data") || dev.CanView("data") {
-		t.Error("developer must be confined to their entity")
+		t.Error("developer must be confined to their business unit")
 	}
 	if mgr.CanChange("payments") || !mgr.CanApprove("manager", "payments") || mgr.CanApprove("manager", "data") || mgr.CanApprove("finops", "payments") {
-		t.Error("manager approves only their entity's manager step")
+		t.Error("manager approves only their BU's manager step")
 	}
 	if !fin.CanView("anything") || fin.CanChange("payments") || !fin.CanApprove("finops", "data") || fin.CanApprove("security", "data") {
-		t.Error("finops sees all entities and approves only the finops step")
+		t.Error("finops sees all BUs and approves only the finops step")
 	}
-	if dev.VisibleEntities()[0] != "payments" || fin.VisibleEntities() != nil {
-		t.Error("visible entities")
+	if dev.VisibleBUs()[0] != "payments" || fin.VisibleBUs() != nil {
+		t.Error("visible BUs")
 	}
 }
 
@@ -86,7 +87,7 @@ func TestPlatformAdmin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !p.PlatformAdmin || !p.HasTenantRole(TenantAdmin) || !p.HasTenantRole(Auditor) || !p.SeesAllEntities() ||
+	if !p.PlatformAdmin || !p.HasTenantRole(TenantAdmin) || !p.HasTenantRole(Auditor) || !p.SeesAllBUs() ||
 		!p.CanChange("any") || !p.CanManageEnvironments("any") || p.Actor() != "platform-admin:root@platform" {
 		t.Fatalf("platform admin must hold tenant admin powers and more everywhere: %+v", p)
 	}

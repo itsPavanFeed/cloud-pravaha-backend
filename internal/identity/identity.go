@@ -2,15 +2,20 @@
 // central plane (which authenticates users and signs assertions) and tenant
 // planes (which verify assertions and enforce permissions).
 //
-// Roles are scoped three ways:
+// Hierarchy: tenant > entity (a company) > business unit (a product). Roles:
 //
-//	platform  platform_admin                         onboard tenants (central only)
-//	tenant    tenant_admin, finops, security, auditor  whole tenant
-//	entity    admin, manager, developer, viewer        one business unit / team
+//	platform  platform_admin                           every tenant (see below)
+//	tenant    tenant_admin, finops, security, auditor   whole tenant
+//	entity    admin, manager, developer, viewer         every BU of that entity
+//	bu        admin, manager, developer, viewer         one business unit
+//
+// Entity roles are inherited by the entity's business units. Central computes
+// each user's effective roles per BU and sends them in the assertion, so tenant
+// planes only ever check BU roles.
 //
 // A platform admin holds, in every tenant, everything a tenant admin has plus
-// read access to all entities and the right to author stacks and runs in any
-// of them. Approval steps are the exception: a platform admin signs manager,
+// read access to all BUs and the right to author stacks and runs in any of
+// them. Approval steps are the exception: a platform admin signs manager,
 // finops or security only with an explicit membership for that role, so
 // separation of duties holds for everyone.
 package identity
@@ -34,27 +39,30 @@ const (
 	Security    = "security"
 	Auditor     = "auditor"
 
-	EntityAdmin = "admin"
-	Manager     = "manager"
-	Developer   = "developer"
-	Viewer      = "viewer"
+	Admin     = "admin"
+	Manager   = "manager"
+	Developer = "developer"
+	Viewer    = "viewer"
 )
 
 var (
 	TenantRoles = []string{TenantAdmin, FinOps, Security, Auditor}
-	EntityRoles = []string{EntityAdmin, Manager, Developer, Viewer}
+	// ScopedRoles are granted on an entity (inherited by its BUs) or on one BU.
+	ScopedRoles = []string{Admin, Manager, Developer, Viewer}
 	SlugRe      = regexp.MustCompile(`^[a-z][a-z0-9-]{1,31}$`)
 )
 
 func IsTenantRole(r string) bool { return contains(TenantRoles, r) }
-func IsEntityRole(r string) bool { return contains(EntityRoles, r) }
+func IsScopedRole(r string) bool { return contains(ScopedRoles, r) }
 
 // Principal is a user acting inside one tenant.
 type Principal struct {
 	Subject     string              `json:"sub"`
 	Tenant      string              `json:"tenant"`
 	TenantRoles []string            `json:"tenant_roles"`
-	EntityRoles map[string][]string `json:"entity_roles"`
+	EntityRoles map[string][]string `json:"entity_roles"` // as granted, for display
+	BURoles     map[string][]string `json:"bu_roles"`     // effective (entity roles included)
+	BUEntity    map[string]string   `json:"bu_entity"`    // every BU of the tenant -> its entity
 	// PlatformAdmin is set by central for platform admins acting in any tenant.
 	PlatformAdmin bool `json:"platform_admin,omitempty"`
 }
@@ -71,34 +79,41 @@ func (p *Principal) HasTenantRole(roles ...string) bool {
 	return false
 }
 
-func (p *Principal) HasEntityRole(entity string, roles ...string) bool {
+// HasBURole checks effective roles in a business unit.
+func (p *Principal) HasBURole(bu string, roles ...string) bool {
 	for _, r := range roles {
-		if contains(p.EntityRoles[entity], r) {
+		if contains(p.BURoles[bu], r) {
 			return true
 		}
 	}
 	return false
 }
 
-// SeesAllEntities: tenant-wide roles read every business unit.
-func (p *Principal) SeesAllEntities() bool {
+// EntityOf returns the entity a business unit belongs to ("" if unknown).
+func (p *Principal) EntityOf(bu string) string { return p.BUEntity[bu] }
+
+// KnownBU reports whether the business unit exists in this tenant.
+func (p *Principal) KnownBU(bu string) bool { _, ok := p.BUEntity[bu]; return ok }
+
+// SeesAllBUs: tenant-wide roles read every business unit.
+func (p *Principal) SeesAllBUs() bool {
 	return p.HasTenantRole(TenantAdmin, FinOps, Security, Auditor)
 }
 
-// CanView reports whether p may read an entity's stacks, runs and environments.
-func (p *Principal) CanView(entity string) bool {
-	return p.SeesAllEntities() || len(p.EntityRoles[entity]) > 0
+// CanView reports whether p may read a BU's stacks, runs and environments.
+func (p *Principal) CanView(bu string) bool {
+	return p.SeesAllBUs() || len(p.BURoles[bu]) > 0
 }
 
-// VisibleEntities returns the entities p can read, or nil meaning "all".
-func (p *Principal) VisibleEntities() []string {
-	if p.SeesAllEntities() {
+// VisibleBUs returns the business units p can read, or nil meaning "all".
+func (p *Principal) VisibleBUs() []string {
+	if p.SeesAllBUs() {
 		return nil
 	}
 	out := []string{}
-	for e, rs := range p.EntityRoles {
+	for bu, rs := range p.BURoles {
 		if len(rs) > 0 {
-			out = append(out, e)
+			out = append(out, bu)
 		}
 	}
 	sort.Strings(out)
@@ -106,13 +121,13 @@ func (p *Principal) VisibleEntities() []string {
 }
 
 // CanChange: create or edit stacks and queue or discard runs.
-func (p *Principal) CanChange(entity string) bool {
-	return p.PlatformAdmin || p.HasEntityRole(entity, EntityAdmin, Developer)
+func (p *Principal) CanChange(bu string) bool {
+	return p.PlatformAdmin || p.HasBURole(bu, Admin, Developer)
 }
 
-// CanManageEnvironments: cloud integrations for an entity.
-func (p *Principal) CanManageEnvironments(entity string) bool {
-	return p.HasTenantRole(TenantAdmin) || p.HasEntityRole(entity, EntityAdmin)
+// CanManageEnvironments: a BU's environments.
+func (p *Principal) CanManageEnvironments(bu string) bool {
+	return p.HasTenantRole(TenantAdmin) || p.HasBURole(bu, Admin)
 }
 
 // Actor is how audit records name the caller; platform admins are marked so
@@ -133,14 +148,14 @@ const (
 
 var Steps = []string{StepManager, StepFinOps, StepSecurity}
 
-func (p *Principal) CanApprove(step, entity string) bool {
+func (p *Principal) CanApprove(step, bu string) bool {
 	switch step {
 	case StepManager:
-		return p.HasEntityRole(entity, Manager)
+		return p.HasBURole(bu, Manager)
 	case StepFinOps:
-		return p.HasTenantRole(FinOps)
+		return contains(p.TenantRoles, FinOps)
 	case StepSecurity:
-		return p.HasTenantRole(Security)
+		return contains(p.TenantRoles, Security)
 	}
 	return false
 }
@@ -160,10 +175,6 @@ func SignAssertion(iss *oidc.Issuer, p *Principal, method, path string, now time
 	if _, err := rand.Read(jti); err != nil {
 		return "", err
 	}
-	er := map[string]any{}
-	for e, rs := range p.EntityRoles {
-		er[e] = rs
-	}
 	return iss.SignJWT(map[string]any{
 		"aud":            Audience(p.Tenant),
 		"sub":            p.Subject,
@@ -173,7 +184,9 @@ func SignAssertion(iss *oidc.Issuer, p *Principal, method, path string, now time
 		"jti":            base64.RawURLEncoding.EncodeToString(jti),
 		"tenant":         p.Tenant,
 		"tenant_roles":   p.TenantRoles,
-		"entity_roles":   er,
+		"entity_roles":   p.EntityRoles,
+		"bu_roles":       p.BURoles,
+		"bu_entity":      p.BUEntity,
 		"platform_admin": p.PlatformAdmin,
 		"req":            method + " " + path,
 	})
@@ -189,6 +202,13 @@ type AssertionVerifier struct {
 
 func NewAssertionVerifier(tenant string, v *oidc.Verifier) *AssertionVerifier {
 	return &AssertionVerifier{Tenant: tenant, verifier: v, seen: map[string]time.Time{}}
+}
+
+// SetVerifier swaps in refreshed central keys, keeping the replay cache.
+func (a *AssertionVerifier) SetVerifier(v *oidc.Verifier) {
+	a.mu.Lock()
+	a.verifier = v
+	a.mu.Unlock()
 }
 
 // Verify checks an assertion for this tenant and this exact request, once.
@@ -223,26 +243,36 @@ func (a *AssertionVerifier) Verify(tok, method, path string, now time.Time) (*Pr
 	a.seen[jti] = now
 	a.mu.Unlock()
 
-	p := &Principal{Tenant: a.Tenant, EntityRoles: map[string][]string{}}
-	p.PlatformAdmin, _ = c["platform_admin"].(bool)
+	p := &Principal{Tenant: a.Tenant, EntityRoles: map[string][]string{}, BURoles: map[string][]string{}, BUEntity: map[string]string{}}
 	p.Subject, _ = c["sub"].(string)
 	if p.Subject == "" {
 		return nil, errors.New("assertion has no subject")
 	}
+	p.PlatformAdmin, _ = c["platform_admin"].(bool)
 	for _, r := range strs(c["tenant_roles"]) {
 		if IsTenantRole(r) {
 			p.TenantRoles = append(p.TenantRoles, r)
 		}
 	}
-	if m, ok := c["entity_roles"].(map[string]any); ok {
-		for e, rs := range m {
-			if !SlugRe.MatchString(e) {
+	scoped := func(claim string, into map[string][]string) {
+		m, _ := c[claim].(map[string]any)
+		for k, rs := range m {
+			if !SlugRe.MatchString(k) {
 				continue
 			}
 			for _, r := range strs(rs) {
-				if IsEntityRole(r) {
-					p.EntityRoles[e] = append(p.EntityRoles[e], r)
+				if IsScopedRole(r) {
+					into[k] = append(into[k], r)
 				}
+			}
+		}
+	}
+	scoped("entity_roles", p.EntityRoles)
+	scoped("bu_roles", p.BURoles)
+	if m, ok := c["bu_entity"].(map[string]any); ok {
+		for bu, e := range m {
+			if es, ok := e.(string); ok && SlugRe.MatchString(bu) && SlugRe.MatchString(es) {
+				p.BUEntity[bu] = es
 			}
 		}
 	}
@@ -267,11 +297,4 @@ func contains(xs []string, x string) bool {
 		}
 	}
 	return false
-}
-
-// SetVerifier swaps in refreshed central keys, keeping the replay cache.
-func (a *AssertionVerifier) SetVerifier(v *oidc.Verifier) {
-	a.mu.Lock()
-	a.verifier = v
-	a.mu.Unlock()
 }

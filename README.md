@@ -28,7 +28,13 @@ Cloud Pravaha is a multi-tenant OpenTofu platform that deploys only **pinned pub
                                                                                                RUNNER(S) ── cloud APIs
 ```
 
-- **Tenants and entities.** A tenant is a client organisation. An entity is a business unit or team inside it. Stacks, environments (cloud integrations), runs and audit events all belong to an entity.
+- **Hierarchy.**
+  ```
+  Tenant ── cloud connections (N: AWS accounts, GCP projects, Azure subscriptions; each scoped to some or all entities)
+    └─ Entity (a company; N per tenant)
+         └─ Business unit (a product; N per entity) ── environments (connection + tier) ── stacks ── runs
+  ```
+  Stacks, environments, runs and audit events belong to a business unit (BU) and record its entity. A BU's environment may use only connections its entity is allowed.
 - **The wrapper.** Central authenticates the user and checks they have a role in the tenant. It then forwards the request to that tenant's backend over mTLS.
   - It strips the user's token and attaches a 60-second ES256 assertion: who the user is, their roles in that tenant, and the exact method and path.
   - The tenant plane accepts user requests only with central's client certificate plus a valid assertion. The assertion is checked for audience (this tenant), request binding and expiry, and can be used only once.
@@ -36,7 +42,7 @@ Cloud Pravaha is a multi-tenant OpenTofu platform that deploys only **pinned pub
 - **Roles.**
   - **Platform:** `platform_admin` onboards tenants and holds everything `tenant_admin` and `auditor` have in every tenant. A platform admin also sees every business unit and can author stacks and runs in any of them, but signs approvals only with an explicit manager, FinOps or Security role. Their actions are audited as `platform-admin:<email>`.
   - **Tenant-wide:** `tenant_admin`, `finops`, `security`, `auditor`. They see every entity.
-  - **Per entity:** `admin`, `manager`, `developer`, `viewer`. They see only their entity, and other entities' resources answer 404.
+  - **Per entity or per BU:** `admin`, `manager`, `developer`, `viewer`. Roles granted on an entity are inherited by all its BUs. Members see only their BUs, and other BUs' resources answer 404.
 - **Risk and approvals.** Each plan is classified, and the risk decides which approvals it needs. Each step must be signed by a different person, and never by the run's author.
 
   | Risk | When | Approvals |
@@ -63,14 +69,15 @@ Requirements: Go 1.25+, Docker, OpenTofu 1.13.x, Node 20+.
 ```
 
 This starts the central plane on `http://127.0.0.1:8090` (plain HTTP is allowed on loopback only) and tenant **acme** on `https://localhost:8444`, each with its own database, plus a runner. It seeds:
-- **Business units:** Payments and Data.
-- **People:** one per role.
-- **Environments and stacks:** two of each.
+- **Entities and BUs:** Retail (Payments, Checkout) and Platform (Data).
+- **Cloud connections:** four samples.
+- **People:** one per role, including an entity-level manager (`RITA`).
+- **Environments and stacks:** a few of each.
 
 Tokens are written to `.dev/multi-tenant/tokens.env`.
 1. Sign in as `ALICE` and plan `prod-naming`.
 2. Approve as `MIKE` (manager), then as `FIONA` (finops).
-3. Sign in as `EVE` to see that the Data unit cannot see Payments.
+3. Sign in as `EVE` to see that the Data BU cannot see Retail.
 
 Use `DEV_CENTRAL_PORT` and `DEV_TENANT_PORT` to change ports.
 
@@ -143,14 +150,16 @@ pravaha dev-cert -dir certs -name tenant -host pravaha.acme.internal [-client]
 | `GET /api/v1/me`, `GET/POST/DELETE /api/v1/me/tokens` | anyone signed in | Your tenants, entities and roles; your tokens |
 | `GET/POST /api/v1/tenants`, `PUT /api/v1/tenants/{t}` | platform admin | Onboard tenants. The response includes the settings the tenant plane needs |
 | `GET /api/v1/tenants/{t}/health` | tenant admin | Central reaches the tenant over mTLS and checks it reports the same slug |
-| `GET/POST /api/v1/tenants/{t}/entities` | tenant admin | Business units |
-| `GET/POST/DELETE /api/v1/tenants/{t}/members` | tenant admin | Grant tenant-wide or entity roles |
+| `GET/POST /api/v1/tenants/{t}/entities` | tenant admin | Entities (companies) |
+| `GET/POST /api/v1/tenants/{t}/bus` | tenant admin | Business units (products) under an entity |
+| `GET/POST/DELETE /api/v1/tenants/{t}/members` | tenant admin | Grant tenant-wide, entity or BU roles (`{"email","role","entity"?,"bu"?}`) |
 | `POST /api/v1/tenants/{t}/tokens` | tenant admin | First token for a member. Refused for people who also belong to another tenant |
 | `/api/v1/t/{t}/…` | members of `t` | **The wrapper.** Forwards to the tenant plane's API below |
 
 Tenant plane API (reached as `/api/v1/t/{t}/…`):
 - `catalog`
-- `environments`
+- `connections` (tenant admins register; everyone reads)
+- `environments` (`{"name","bu","tier","connection",…}`)
 - `stacks` (and `stacks/preview`, `stacks/{id}/runs`, `stacks/{id}/state-versions`)
 - `runs/{id}`, `runs/{id}/logs`, `runs/{id}/approve` with `{"step": "manager"|"finops"|"security", "reason"}`, and `runs/{id}/discard`
 - `audit`, `audit/verify`

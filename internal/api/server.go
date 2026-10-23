@@ -69,6 +69,10 @@ func (s *Server) Handler() http.Handler {
 	u := func(h http.HandlerFunc) http.Handler { return s.authUser(h) }
 	mux.Handle("GET /api/v1/me", u(s.me))
 	mux.Handle("GET /api/v1/catalog", u(s.getCatalog))
+	mux.Handle("GET /api/v1/connections", u(s.listConnections))
+	mux.Handle("POST /api/v1/connections", u(s.createConnection))
+	mux.Handle("GET /api/v1/connections/{id}", u(s.getConnection))
+	mux.Handle("PUT /api/v1/connections/{id}", u(s.updateConnection))
 	mux.Handle("GET /api/v1/environments", u(s.listEnvironments))
 	mux.Handle("POST /api/v1/environments", u(s.createEnvironment))
 	mux.Handle("GET /api/v1/environments/{id}", u(s.getEnvironment))

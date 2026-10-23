@@ -200,32 +200,77 @@ func (s *Store) Entity(ctx context.Context, tenantID, slug string) (*Entity, err
 	return scanEntity(s.Pool().QueryRow(ctx, `SELECT id, slug, name, created_by, created_at FROM entities WHERE tenant_id = $1 AND slug = $2`, tenantID, slug))
 }
 
+// ---- business units ----
+
+type BU struct {
+	ID        string    `json:"id"`
+	Slug      string    `json:"slug"`
+	Name      string    `json:"name"`
+	Entity    string    `json:"entity"`
+	CreatedBy string    `json:"created_by"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+const buSelect = `SELECT b.id, b.slug, b.name, e.slug, b.created_by, b.created_at FROM business_units b JOIN entities e ON e.id = b.entity_id`
+
+func scanBU(r pgx.Row) (*BU, error) {
+	var b BU
+	err := r.Scan(&b.ID, &b.Slug, &b.Name, &b.Entity, &b.CreatedBy, &b.CreatedAt)
+	return &b, store.NotFound(err)
+}
+
+func (s *Store) CreateBU(ctx context.Context, tenantID, entityID, slug, name, by string) (*BU, error) {
+	var id string
+	err := s.Pool().QueryRow(ctx, `INSERT INTO business_units (tenant_id, entity_id, slug, name, created_by) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+		tenantID, entityID, slug, name, by).Scan(&id)
+	if store.IsUnique(err) {
+		return nil, ErrConflict
+	}
+	if err != nil {
+		return nil, err
+	}
+	return scanBU(s.Pool().QueryRow(ctx, buSelect+` WHERE b.id = $1`, id))
+}
+
+func (s *Store) BUs(ctx context.Context, tenantID string) ([]*BU, error) {
+	rows, err := s.Pool().Query(ctx, buSelect+` WHERE b.tenant_id = $1 ORDER BY e.slug, b.slug`, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	return store.Collect(rows, scanBU)
+}
+
+func (s *Store) BUBySlug(ctx context.Context, tenantID, slug string) (*BU, error) {
+	return scanBU(s.Pool().QueryRow(ctx, buSelect+` WHERE b.tenant_id = $1 AND b.slug = $2`, tenantID, slug))
+}
+
 // ---- memberships ----
 
 type Membership struct {
 	ID        string    `json:"id"`
 	Email     string    `json:"email"`
 	Tenant    string    `json:"tenant"`
-	Entity    string    `json:"entity,omitempty"` // '' = tenant-wide role
+	Entity    string    `json:"entity,omitempty"` // set for entity-level roles
+	BU        string    `json:"bu,omitempty"`     // set for BU-level roles; neither = tenant-wide
 	Role      string    `json:"role"`
 	CreatedBy string    `json:"created_by"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
-const memberSelect = `SELECT m.id, u.email, t.slug, COALESCE(e.slug, ''), m.role, m.created_by, m.created_at
+const memberSelect = `SELECT m.id, u.email, t.slug, COALESCE(e.slug, ''), COALESCE(b.slug, ''), m.role, m.created_by, m.created_at
 	FROM memberships m JOIN users u ON u.id = m.user_id JOIN tenants t ON t.id = m.tenant_id
-	LEFT JOIN entities e ON e.id = m.entity_id`
+	LEFT JOIN entities e ON e.id = m.entity_id LEFT JOIN business_units b ON b.id = m.bu_id`
 
 func scanMember(r pgx.Row) (*Membership, error) {
 	var m Membership
-	err := r.Scan(&m.ID, &m.Email, &m.Tenant, &m.Entity, &m.Role, &m.CreatedBy, &m.CreatedAt)
+	err := r.Scan(&m.ID, &m.Email, &m.Tenant, &m.Entity, &m.BU, &m.Role, &m.CreatedBy, &m.CreatedAt)
 	return &m, store.NotFound(err)
 }
 
-func (s *Store) AddMembership(ctx context.Context, userID, tenantID string, entityID *string, role, by string) (*Membership, error) {
+func (s *Store) AddMembership(ctx context.Context, userID, tenantID string, entityID, buID *string, role, by string) (*Membership, error) {
 	var id string
-	err := s.Pool().QueryRow(ctx, `INSERT INTO memberships (user_id, tenant_id, entity_id, role, created_by) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-		userID, tenantID, entityID, role, by).Scan(&id)
+	err := s.Pool().QueryRow(ctx, `INSERT INTO memberships (user_id, tenant_id, entity_id, bu_id, role, created_by) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+		userID, tenantID, entityID, buID, role, by).Scan(&id)
 	if store.IsUnique(err) {
 		return nil, ErrConflict
 	}
@@ -245,7 +290,7 @@ func (s *Store) RemoveMembership(ctx context.Context, tenantID, id string) (*Mem
 }
 
 func (s *Store) TenantMembers(ctx context.Context, tenantID string) ([]*Membership, error) {
-	rows, err := s.Pool().Query(ctx, memberSelect+` WHERE m.tenant_id = $1 ORDER BY u.email, e.slug NULLS FIRST, m.role`, tenantID)
+	rows, err := s.Pool().Query(ctx, memberSelect+` WHERE m.tenant_id = $1 ORDER BY u.email, e.slug NULLS FIRST, b.slug NULLS FIRST, m.role`, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -253,6 +298,8 @@ func (s *Store) TenantMembers(ctx context.Context, tenantID string) ([]*Membersh
 }
 
 // Principal builds a user's roles inside one tenant (nil if they have none).
+// Entity roles are inherited by every BU of the entity: BURoles holds each
+// BU's effective roles, which is all tenant planes need to enforce.
 func (s *Store) Principal(ctx context.Context, u *User, tenantSlug string) (*identity.Principal, error) {
 	rows, err := s.Pool().Query(ctx, memberSelect+` WHERE m.user_id = $1 AND t.slug = $2`, u.ID, tenantSlug)
 	if err != nil {
@@ -265,12 +312,40 @@ func (s *Store) Principal(ctx context.Context, u *User, tenantSlug string) (*ide
 	if len(ms) == 0 && !u.PlatformAdmin {
 		return nil, nil
 	}
-	p := &identity.Principal{Subject: u.Email, Tenant: tenantSlug, TenantRoles: []string{}, EntityRoles: map[string][]string{}, PlatformAdmin: u.PlatformAdmin}
+	t, err := s.Tenant(ctx, tenantSlug)
+	if err != nil {
+		return nil, err
+	}
+	bus, err := s.BUs(ctx, t.ID)
+	if err != nil {
+		return nil, err
+	}
+	p := &identity.Principal{Subject: u.Email, Tenant: tenantSlug, TenantRoles: []string{}, EntityRoles: map[string][]string{},
+		BURoles: map[string][]string{}, BUEntity: map[string]string{}, PlatformAdmin: u.PlatformAdmin}
+	for _, b := range bus {
+		p.BUEntity[b.Slug] = b.Entity
+	}
+	add := func(m map[string][]string, k, role string) {
+		for _, r := range m[k] {
+			if r == role {
+				return
+			}
+		}
+		m[k] = append(m[k], role)
+	}
 	for _, m := range ms {
-		if m.Entity == "" {
+		switch {
+		case m.BU != "":
+			add(p.BURoles, m.BU, m.Role)
+		case m.Entity != "":
+			add(p.EntityRoles, m.Entity, m.Role)
+		default:
 			p.TenantRoles = append(p.TenantRoles, m.Role)
-		} else {
-			p.EntityRoles[m.Entity] = append(p.EntityRoles[m.Entity], m.Role)
+		}
+	}
+	for _, b := range bus {
+		for _, r := range p.EntityRoles[b.Entity] {
+			add(p.BURoles, b.Slug, r)
 		}
 	}
 	return p, nil

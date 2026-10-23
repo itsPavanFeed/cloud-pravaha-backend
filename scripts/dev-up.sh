@@ -2,7 +2,7 @@
 # Local multi-tenant development stack, all on loopback:
 #   central plane   http://127.0.0.1:8090   web UI, identity, routing (plain HTTP allowed on loopback only)
 #   tenant "acme"   https://localhost:8444  its own database, state and runner; reached by central over mTLS
-# Seeds business units (payments, data) and one person per role. Tokens are
+# Seeds entities and business units, cloud connections and one person per role. Tokens are
 # written to .dev/tokens.env (mode 0600).
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -77,13 +77,19 @@ if [[ -n "$FRESH" || ! -f "$DEV/tokens.env" ]]; then
   call "$ROOT_TOKEN" POST /api/v1/tenants "{\"slug\":\"acme\",\"name\":\"Acme Corp\",\"backend_url\":\"https://localhost:$TP\",\"server_ca_pem\":$CA_JSON,\"admin_email\":\"tina@acme.local\"}" >/dev/null
   tok() { call "$1" POST /api/v1/tenants/acme/tokens "{\"email\":\"$2\",\"name\":\"dev\",\"ttl_days\":30}" | J secret; }
   TINA=$(tok "$ROOT_TOKEN" tina@acme.local)
-  call "$TINA" POST /api/v1/tenants/acme/entities '{"slug":"payments","name":"Payments"}' >/dev/null
-  call "$TINA" POST /api/v1/tenants/acme/entities '{"slug":"data","name":"Data platform"}' >/dev/null
-  for m in alice@acme.local:developer:payments mike@acme.local:manager:payments eve@acme.local:developer:data \
-           fiona@acme.local:finops: sam@acme.local:security: ava@acme.local:auditor:; do
-    IFS=: read -r email role entity <<<"$m"
-    call "$TINA" POST /api/v1/tenants/acme/members "{\"email\":\"$email\",\"role\":\"$role\",\"entity\":\"$entity\"}" >/dev/null
+  call "$TINA" POST /api/v1/tenants/acme/entities '{"slug":"retail","name":"Acme Retail Ltd"}' >/dev/null
+  call "$TINA" POST /api/v1/tenants/acme/entities '{"slug":"platform","name":"Acme Platform Ltd"}' >/dev/null
+  call "$TINA" POST /api/v1/tenants/acme/bus '{"slug":"payments","name":"Payments","entity":"retail"}' >/dev/null
+  call "$TINA" POST /api/v1/tenants/acme/bus '{"slug":"checkout","name":"Checkout","entity":"retail"}' >/dev/null
+  call "$TINA" POST /api/v1/tenants/acme/bus '{"slug":"data","name":"Data platform","entity":"platform"}' >/dev/null
+  # email:role:scope-kind:scope (scope-kind is bu, entity, or empty for tenant-wide)
+  for m in alice@acme.local:developer:bu:payments mike@acme.local:manager:bu:payments rita@acme.local:manager:entity:retail \
+           eve@acme.local:developer:bu:data fiona@acme.local:finops:: sam@acme.local:security:: ava@acme.local:auditor::; do
+    IFS=: read -r email role kind scope <<<"$m"
+    body="{\"email\":\"$email\",\"role\":\"$role\"${kind:+,\"$kind\":\"$scope\"}}"
+    call "$TINA" POST /api/v1/tenants/acme/members "$body" >/dev/null
   done
+  for f in "$RES"/connections/*.json; do call "$TINA" POST /api/v1/t/acme/connections "@$f" >/dev/null; done
   RUNNER_TOKEN=$(call "$TINA" POST /api/v1/t/acme/runners '{"name":"dev-runner","pool":"default"}' | J secret)
   for f in payments-dev payments-prod data-dev; do call "$TINA" POST /api/v1/t/acme/environments "@$RES/environments/$f.json" >/dev/null; done
   ALICE=$(tok "$TINA" alice@acme.local)
@@ -93,7 +99,7 @@ if [[ -n "$FRESH" || ! -f "$DEV/tokens.env" ]]; then
     echo "ROOT=$ROOT_TOKEN       # platform admin (onboarding only)"
     echo "TINA=$TINA       # acme tenant_admin"
     echo "ALICE=$ALICE       # developer, payments"
-    for u in mike eve fiona sam ava; do echo "$(echo $u | tr a-z A-Z)=$(tok "$TINA" $u@acme.local)"; done
+    for u in mike rita eve fiona sam ava; do echo "$(echo $u | tr a-z A-Z)=$(tok "$TINA" $u@acme.local)"; done
     echo "RUNNER_TOKEN=$RUNNER_TOKEN"
   } >"$DEV/tokens.env"
 fi
@@ -110,9 +116,11 @@ cat <<EOT
 
   Cloud Pravaha is running at $CENTRAL  (central plane)  ->  tenant acme at https://localhost:$TP
   Sign in with a token from $DEV/tokens.env:
-    ALICE  developer in Payments: plans stacks       MIKE   manager in Payments: signs the manager step
-    FIONA  finops (whole tenant): signs finops       SAM    security (whole tenant): signs security
-    EVE    developer in Data: cannot see Payments    AVA    auditor   TINA tenant admin   ROOT platform admin
+    Tenant acme > entities Retail (BUs Payments, Checkout) and Platform (BU Data)
+    ALICE  developer, BU Payments: plans stacks      MIKE   manager, BU Payments: signs the manager step
+    RITA   manager, entity Retail (all its BUs)      FIONA  finops (tenant): signs finops
+    SAM    security (tenant): signs security         EVE    developer, BU Data: cannot see Retail
+    AVA    auditor   TINA tenant admin   ROOT platform admin
   Logs in $DEV/*.log.  Ctrl-C to stop (PostgreSQL keeps running: docker rm -f $PG_NAME).
 
 EOT

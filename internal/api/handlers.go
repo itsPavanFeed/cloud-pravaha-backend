@@ -23,7 +23,7 @@ var (
 	reasonMax = 500
 )
 
-// forbidden answers 404 rather than 403 for resources in entities the caller
+// forbidden answers 404 rather than 403 for resources in BUs the caller
 // cannot see, so business units cannot discover each other's stacks.
 func forbidden(w http.ResponseWriter, visible bool, msg string) {
 	if !visible {
@@ -44,22 +44,22 @@ func (s *Server) getCatalog(w http.ResponseWriter, r *http.Request) {
 // ---- environments ----
 
 type envBody struct {
-	Name         string          `json:"name"`
-	Entity       string          `json:"entity"`
-	Tier         string          `json:"tier"`
-	Cloud        json.RawMessage `json:"cloud"`
-	RunnerPool   string          `json:"runner_pool"`
-	MaxDestroys  *int            `json:"max_destroys"`
-	AllowDestroy bool            `json:"allow_destroy"`
+	Name         string `json:"name"`
+	BU           string `json:"bu"`
+	Tier         string `json:"tier"`
+	Connection   string `json:"connection"` // cloud connection name; "" = no cloud
+	RunnerPool   string `json:"runner_pool"`
+	MaxDestroys  *int   `json:"max_destroys"`
+	AllowDestroy bool   `json:"allow_destroy"`
 }
 
-func (b *envBody) validate(create bool) (*spec.Cloud, []string) {
+func (b *envBody) validate(create bool) []string {
 	var probs []string
 	if create && !envNameRe.MatchString(b.Name) {
 		probs = append(probs, "name must be lowercase letters, digits and dashes (2-32)")
 	}
-	if create && !identity.SlugRe.MatchString(b.Entity) {
-		probs = append(probs, "entity must be the business unit's slug")
+	if create && !identity.SlugRe.MatchString(b.BU) {
+		probs = append(probs, "bu must be the business unit's slug")
 	}
 	if b.Tier != risk.TierProd && b.Tier != risk.TierNonProd {
 		probs = append(probs, `tier must be "prod" or "nonprod"`)
@@ -70,11 +70,25 @@ func (b *envBody) validate(create bool) (*spec.Cloud, []string) {
 	if b.MaxDestroys == nil || *b.MaxDestroys < 0 || *b.MaxDestroys > 1000 {
 		probs = append(probs, "max_destroys must be between 0 and 1000")
 	}
-	c, err := spec.DecodeCloud(b.Cloud)
-	if err != nil {
-		probs = append(probs, errLines(err)...)
+	return probs
+}
+
+// connectionFor resolves an environment's connection and checks the BU's
+// entity may use it. An empty name means no cloud.
+func (s *Server) connectionFor(w http.ResponseWriter, r *http.Request, name, bu string) (*string, bool) {
+	if name == "" {
+		return nil, true
 	}
-	return c, probs
+	c, err := s.store.GetConnection(r.Context(), name)
+	if err != nil {
+		writeErr(w, 422, "unknown cloud connection "+name)
+		return nil, false
+	}
+	if entity := user(r).EntityOf(bu); !c.Allows(entity) {
+		writeErr(w, http.StatusForbidden, "cloud connection "+c.Name+" is not available to entity "+entity)
+		return nil, false
+	}
+	return &c.ID, true
 }
 
 func (s *Server) listEnvironments(w http.ResponseWriter, r *http.Request) {
@@ -88,7 +102,7 @@ func (s *Server) listEnvironments(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) getEnvironment(w http.ResponseWriter, r *http.Request) {
 	e, err := s.store.GetEnvironment(r.Context(), r.PathValue("id"))
-	if err == nil && !user(r).CanView(e.Entity) {
+	if err == nil && !user(r).CanView(e.BU) {
 		err = store.ErrNotFound
 	}
 	if err != nil {
@@ -112,56 +126,64 @@ func (s *Server) createEnvironment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := user(r)
-	if !p.CanManageEnvironments(b.Entity) {
-		forbidden(w, p.CanView(b.Entity) || b.Entity == "", "managing environments needs tenant_admin, or admin of the entity")
+	if !p.CanManageEnvironments(b.BU) {
+		forbidden(w, p.CanView(b.BU) || b.BU == "", "managing environments needs tenant_admin, or admin of the business unit")
 		return
 	}
-	c, probs := b.validate(true)
-	if len(probs) > 0 {
+	if probs := b.validate(true); len(probs) > 0 {
 		writeErr(w, 422, "invalid environment", probs...)
 		return
 	}
-	cloud, _ := json.Marshal(c)
-	e, err := s.store.CreateEnvironment(r.Context(), &store.Environment{Name: b.Name, Entity: b.Entity, Tier: b.Tier, Cloud: cloud, RunnerPool: b.RunnerPool,
-		MaxDestroys: *b.MaxDestroys, AllowDestroy: b.AllowDestroy, CreatedBy: p.Subject})
+	if !p.KnownBU(b.BU) {
+		writeErr(w, 422, "unknown business unit "+b.BU)
+		return
+	}
+	connID, ok := s.connectionFor(w, r, b.Connection, b.BU)
+	if !ok {
+		return
+	}
+	e, err := s.store.CreateEnvironment(r.Context(), &store.Environment{Name: b.Name, BU: b.BU, Entity: p.EntityOf(b.BU), Tier: b.Tier, ConnectionID: connID,
+		RunnerPool: b.RunnerPool, MaxDestroys: *b.MaxDestroys, AllowDestroy: b.AllowDestroy, CreatedBy: p.Subject})
 	if err != nil {
 		s.writeStoreErr(w, err, "an environment with that name exists")
 		return
 	}
-	s.audit(r.Context(), p.Actor(), "environment.create", "environment/"+e.Name, e.Entity, e)
+	s.audit(r.Context(), p.Actor(), "environment.create", "environment/"+e.Name, e.BU, e)
 	writeJSON(w, 201, e)
 }
 
 func (s *Server) updateEnvironment(w http.ResponseWriter, r *http.Request) {
 	p := user(r)
 	cur, err := s.store.GetEnvironment(r.Context(), r.PathValue("id"))
-	if err == nil && !p.CanView(cur.Entity) {
+	if err == nil && !p.CanView(cur.BU) {
 		err = store.ErrNotFound
 	}
 	if err != nil {
 		s.writeStoreErr(w, err, "")
 		return
 	}
-	if !p.CanManageEnvironments(cur.Entity) {
-		writeErr(w, http.StatusForbidden, "managing environments needs tenant_admin, or admin of the entity")
+	if !p.CanManageEnvironments(cur.BU) {
+		writeErr(w, http.StatusForbidden, "managing environments needs tenant_admin, or admin of the business unit")
 		return
 	}
 	var b envBody
 	if !decode(w, r, &b) {
 		return
 	}
-	c, probs := b.validate(false)
-	if len(probs) > 0 {
+	if probs := b.validate(false); len(probs) > 0 {
 		writeErr(w, 422, "invalid environment", probs...)
 		return
 	}
-	cloud, _ := json.Marshal(c)
-	e, err := s.store.UpdateEnvironment(r.Context(), &store.Environment{ID: cur.ID, Tier: b.Tier, Cloud: cloud, RunnerPool: b.RunnerPool, MaxDestroys: *b.MaxDestroys, AllowDestroy: b.AllowDestroy})
+	connID, ok := s.connectionFor(w, r, b.Connection, cur.BU)
+	if !ok {
+		return
+	}
+	e, err := s.store.UpdateEnvironment(r.Context(), &store.Environment{ID: cur.ID, Tier: b.Tier, ConnectionID: connID, RunnerPool: b.RunnerPool, MaxDestroys: *b.MaxDestroys, AllowDestroy: b.AllowDestroy})
 	if err != nil {
 		s.writeStoreErr(w, err, "")
 		return
 	}
-	s.audit(r.Context(), p.Actor(), "environment.update", "environment/"+e.Name, e.Entity, map[string]any{"before": cur, "after": e})
+	s.audit(r.Context(), p.Actor(), "environment.update", "environment/"+e.Name, e.BU, map[string]any{"before": cur, "after": e})
 	writeJSON(w, 200, e)
 }
 
@@ -205,7 +227,7 @@ func normalizeSpec(raw []byte) []byte {
 // visibleEnv loads an environment the caller can see, or answers 422.
 func (s *Server) visibleEnv(w http.ResponseWriter, r *http.Request, name string) *store.Environment {
 	env, err := s.store.GetEnvironment(r.Context(), name)
-	if err != nil || !user(r).CanView(env.Entity) {
+	if err != nil || !user(r).CanView(env.BU) {
 		writeErr(w, 422, "unknown environment")
 		return nil
 	}
@@ -237,7 +259,7 @@ func (s *Server) previewStack(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"valid": true, "files": files, "providers": gen.Providers, "modules": gen.Modules, "hash": gen.Hash})
 }
 
-// createStack: the stack belongs to its environment's entity.
+// createStack: the stack belongs to its environment's business unit.
 func (s *Server) createStack(w http.ResponseWriter, r *http.Request) {
 	var b stackBody
 	if !decode(w, r, &b) {
@@ -252,27 +274,27 @@ func (s *Server) createStack(w http.ResponseWriter, r *http.Request) {
 	if env == nil {
 		return
 	}
-	if !p.CanChange(env.Entity) {
-		writeErr(w, http.StatusForbidden, "creating stacks needs the developer or admin role in "+env.Entity)
+	if !p.CanChange(env.BU) {
+		writeErr(w, http.StatusForbidden, "creating stacks needs the developer or admin role in "+env.BU)
 		return
 	}
 	if _, _, probs := s.build(r.Context(), b.Name, env, b.Spec); probs != nil {
 		writeErr(w, 422, "stack spec rejected", probs...)
 		return
 	}
-	st, err := s.store.CreateStack(r.Context(), b.Name, env.Entity, env.ID, normalizeSpec(b.Spec), p.Subject)
+	st, err := s.store.CreateStack(r.Context(), b.Name, env.BU, env.Entity, env.ID, normalizeSpec(b.Spec), p.Subject)
 	if err != nil {
 		s.writeStoreErr(w, err, "a stack with that name exists")
 		return
 	}
-	s.audit(r.Context(), p.Actor(), "stack.create", "stack/"+st.Name, st.Entity, map[string]any{"environment": env.Name, "spec": st.Spec})
+	s.audit(r.Context(), p.Actor(), "stack.create", "stack/"+st.Name, st.BU, map[string]any{"environment": env.Name, "spec": st.Spec})
 	writeJSON(w, 201, st)
 }
 
 // visibleStack loads a stack the caller can see, or answers 404.
 func (s *Server) visibleStack(w http.ResponseWriter, r *http.Request) *store.Stack {
 	st, err := s.store.GetStack(r.Context(), r.PathValue("id"))
-	if err == nil && !user(r).CanView(st.Entity) {
+	if err == nil && !user(r).CanView(st.BU) {
 		err = store.ErrNotFound
 	}
 	if err != nil {
@@ -288,8 +310,8 @@ func (s *Server) updateStack(w http.ResponseWriter, r *http.Request) {
 	if st == nil {
 		return
 	}
-	if !p.CanChange(st.Entity) {
-		writeErr(w, http.StatusForbidden, "editing stacks needs the developer or admin role in "+st.Entity)
+	if !p.CanChange(st.BU) {
+		writeErr(w, http.StatusForbidden, "editing stacks needs the developer or admin role in "+st.BU)
 		return
 	}
 	var b struct {
@@ -311,12 +333,12 @@ func (s *Server) updateStack(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreErr(w, err, "the stack has an active run; finish or discard it first")
 		return
 	}
-	s.audit(r.Context(), p.Actor(), "stack.update", "stack/"+st.Name, st.Entity, map[string]any{"before": st.Spec, "after": json.RawMessage(normalizeSpec(b.Spec))})
+	s.audit(r.Context(), p.Actor(), "stack.update", "stack/"+st.Name, st.BU, map[string]any{"before": st.Spec, "after": json.RawMessage(normalizeSpec(b.Spec))})
 	st, _ = s.store.GetStack(r.Context(), st.ID)
 	writeJSON(w, 200, st)
 }
 
-func visible(r *http.Request) []string { return user(r).VisibleEntities() }
+func visible(r *http.Request) []string { return user(r).VisibleBUs() }
 
 func (s *Server) listStacks(w http.ResponseWriter, r *http.Request) {
 	sts, err := s.store.ListStacks(r.Context(), visible(r))
@@ -354,8 +376,8 @@ func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
 	if st == nil {
 		return
 	}
-	if !p.CanChange(st.Entity) {
-		writeErr(w, http.StatusForbidden, "starting runs needs the developer or admin role in "+st.Entity)
+	if !p.CanChange(st.BU) {
+		writeErr(w, http.StatusForbidden, "starting runs needs the developer or admin role in "+st.BU)
 		return
 	}
 	var b struct {
@@ -390,7 +412,7 @@ func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreErr(w, err, "the stack already has an active run")
 		return
 	}
-	s.audit(r.Context(), p.Actor(), "run.create", "run/"+run.ID, st.Entity, map[string]string{"stack": st.Name, "operation": b.Operation, "config_hash": gen.Hash})
+	s.audit(r.Context(), p.Actor(), "run.create", "run/"+run.ID, st.BU, map[string]string{"stack": st.Name, "operation": b.Operation, "config_hash": gen.Hash})
 	s.notify()
 	writeJSON(w, 201, run)
 }
@@ -419,7 +441,7 @@ func (s *Server) listStackRuns(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) visibleRun(w http.ResponseWriter, r *http.Request) *store.Run {
 	run, err := s.store.GetRun(r.Context(), r.PathValue("id"))
-	if err == nil && !user(r).CanView(run.Entity) {
+	if err == nil && !user(r).CanView(run.BU) {
 		err = store.ErrNotFound
 	}
 	if err != nil {
@@ -469,8 +491,8 @@ func (s *Server) approveRun(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 422, "reason is too long")
 		return
 	}
-	if !p.CanApprove(b.Step, run.Entity) {
-		writeErr(w, http.StatusForbidden, "you cannot sign the "+b.Step+" approval for "+run.Entity)
+	if !p.CanApprove(b.Step, run.BU) {
+		writeErr(w, http.StatusForbidden, "you cannot sign the "+b.Step+" approval for "+run.BU)
 		return
 	}
 	if run.Status != "planned" {
@@ -503,7 +525,7 @@ func (s *Server) approveRun(w http.ResponseWriter, r *http.Request) {
 	}
 	if stale != "" {
 		s.store.Discard(r.Context(), run.ID, "stale plan: "+stale)
-		s.audit(r.Context(), p.Actor(), "run.discard", "run/"+run.ID, run.Entity, map[string]string{"reason": "stale plan: " + stale})
+		s.audit(r.Context(), p.Actor(), "run.discard", "run/"+run.ID, run.BU, map[string]string{"reason": "stale plan: " + stale})
 		writeErr(w, http.StatusConflict, "plan is stale and was discarded: "+stale+"; start a new run")
 		return
 	}
@@ -519,7 +541,7 @@ func (s *Server) approveRun(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreErr(w, err, "")
 		return
 	}
-	s.audit(r.Context(), p.Actor(), "run.approve", "run/"+run.ID, run.Entity, map[string]any{
+	s.audit(r.Context(), p.Actor(), "run.approve", "run/"+run.ID, run.BU, map[string]any{
 		"stack": st.Name, "step": b.Step, "reason": b.Reason, "plan_sha256": deref(run.PlanSHA256), "chain_complete": complete})
 	if complete {
 		s.notify()
@@ -534,8 +556,8 @@ func (s *Server) discardRun(w http.ResponseWriter, r *http.Request) {
 	if run == nil {
 		return
 	}
-	if !p.CanChange(run.Entity) && !p.HasEntityRole(run.Entity, identity.Manager) {
-		writeErr(w, http.StatusForbidden, "discarding runs needs the developer, manager or admin role in "+run.Entity)
+	if !p.CanChange(run.BU) && !p.HasBURole(run.BU, identity.Manager) {
+		writeErr(w, http.StatusForbidden, "discarding runs needs the developer, manager or admin role in "+run.BU)
 		return
 	}
 	var b struct {
@@ -552,18 +574,18 @@ func (s *Server) discardRun(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreErr(w, err, "only queued or planned runs can be discarded")
 		return
 	}
-	s.audit(r.Context(), p.Actor(), "run.discard", "run/"+run.ID, run.Entity, map[string]string{"reason": b.Reason})
+	s.audit(r.Context(), p.Actor(), "run.discard", "run/"+run.ID, run.BU, map[string]string{"reason": b.Reason})
 	run, _ = s.store.GetRun(r.Context(), run.ID)
 	writeJSON(w, 200, run)
 }
 
 // ---- audit ----
 
-// listAudit: tenant-wide roles see everything; entity members see their
-// entities' events only (not tenant-wide ones).
+// listAudit: tenant-wide roles see everything; BU members see their BUs'
+// events only (not tenant-wide ones).
 func (s *Server) listAudit(w http.ResponseWriter, r *http.Request) {
 	before, _ := strconv.ParseInt(r.URL.Query().Get("before"), 10, 64)
-	evs, err := s.store.ListAudit(r.Context(), store.AuditQuery{Before: before, Limit: limit(r, 100, 500), Filter: r.URL.Query().Get("q"), Entities: visible(r)})
+	evs, err := s.store.ListAudit(r.Context(), store.AuditQuery{Before: before, Limit: limit(r, 100, 500), Filter: r.URL.Query().Get("q"), Scopes: visible(r)})
 	if err != nil {
 		s.writeStoreErr(w, err, "")
 		return
@@ -572,7 +594,7 @@ func (s *Server) listAudit(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) verifyAudit(w http.ResponseWriter, r *http.Request) {
-	if !user(r).SeesAllEntities() {
+	if !user(r).SeesAllBUs() {
 		writeErr(w, http.StatusForbidden, "verifying the whole audit chain needs a tenant-wide role")
 		return
 	}

@@ -19,7 +19,7 @@ type Event struct {
 	Actor    string          `json:"actor"`
 	Action   string          `json:"action"`
 	Target   string          `json:"target"`
-	Entity   string          `json:"entity,omitempty"`
+	Scope    string          `json:"scope,omitempty"` // BU on tenant planes, tenant slug on central
 	Payload  json.RawMessage `json:"payload"`
 	PrevHash string          `json:"prev_hash"`
 	Hash     string          `json:"hash"`
@@ -44,7 +44,7 @@ func Normalize(e *Event) {
 func Hash(prev string, e Event) string {
 	Normalize(&e)
 	h := sha256.New()
-	for _, part := range []string{prev, e.TS.Format(time.RFC3339Nano), e.Actor, e.Action, e.Target, e.Entity, string(e.Payload)} {
+	for _, part := range []string{prev, e.TS.Format(time.RFC3339Nano), e.Actor, e.Action, e.Target, e.Scope, string(e.Payload)} {
 		h.Write([]byte(part))
 		h.Write([]byte{0})
 	}

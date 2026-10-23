@@ -86,7 +86,7 @@ func (s *Server) startJob(w http.ResponseWriter, r *http.Request, run *store.Run
 	}
 	fail := func(msg string) {
 		s.store.FinishRun(ctx, run.ID, "failed", msg)
-		s.audit(ctx, who(r).Subject(), "run.failed", "run/"+run.ID, run.Entity, map[string]string{"error": msg})
+		s.audit(ctx, who(r).Subject(), "run.failed", "run/"+run.ID, run.BU, map[string]string{"error": msg})
 		w.WriteHeader(http.StatusNoContent)
 	}
 	st, err := s.store.GetStack(ctx, run.StackID)
@@ -126,7 +126,7 @@ func (s *Server) startJob(w http.ResponseWriter, r *http.Request, run *store.Run
 			return
 		}
 	}
-	s.audit(ctx, who(r).Subject(), "run.claim", "run/"+run.ID, run.Entity, map[string]any{"phase": phase, "stack": st.Name, "oidc": cloud.NeedsOIDCToken()})
+	s.audit(ctx, who(r).Subject(), "run.claim", "run/"+run.ID, run.BU, map[string]any{"phase": phase, "stack": st.Name, "oidc": cloud.NeedsOIDCToken()})
 	writeJSON(w, 200, job)
 }
 
@@ -211,7 +211,7 @@ func (s *Server) agentPlan(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreErr(w, err, "run is not planning")
 		return
 	}
-	s.audit(ctx, who(r).Subject(), "run.planned", "run/"+run.ID, run.Entity, map[string]any{
+	s.audit(ctx, who(r).Subject(), "run.planned", "run/"+run.ID, run.BU, map[string]any{
 		"status": status, "add": up.Summary.Add, "change": up.Summary.Change, "destroy": up.Summary.Destroy, "replace": up.Summary.Replace,
 		"policy_passed": res.Passed, "violations": len(res.Violations), "plan_sha256": up.SHA256, "state_serial": serial,
 		"risk": rk.Level, "required_approvals": rk.Steps, "monthly_cost_delta_usd": est.MonthlyDelta,
@@ -265,7 +265,7 @@ func (s *Server) agentFinish(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreErr(w, err, "run already finished")
 		return
 	}
-	s.audit(r.Context(), who(r).Subject(), "run."+b.Status, "run/"+run.ID, run.Entity, map[string]string{"stack": run.StackName, "error": b.Error})
+	s.audit(r.Context(), who(r).Subject(), "run."+b.Status, "run/"+run.ID, run.BU, map[string]string{"stack": run.StackName, "error": b.Error})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -320,7 +320,7 @@ func (s *Server) state(w http.ResponseWriter, r *http.Request) {
 			s.writeStoreErr(w, err, "")
 			return
 		}
-		s.audit(ctx, actor, "state.write", "stack/"+run.StackName, run.Entity, map[string]any{"serial": serial, "sha256": sha, "bytes": len(data)})
+		s.audit(ctx, actor, "state.write", "stack/"+run.StackName, run.BU, map[string]any{"serial": serial, "sha256": sha, "bytes": len(data)})
 		w.WriteHeader(http.StatusOK)
 	case "LOCK":
 		info, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 64<<10))
