@@ -26,6 +26,7 @@ const (
 	maxJSONDepth   = 6
 	maxJSONNodes   = 500
 	maxMapValueLen = 256
+	maxImports     = 200
 )
 
 var (
@@ -33,12 +34,25 @@ var (
 	instanceNameRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,40}$`)
 	mapKeyRe       = regexp.MustCompile(`^[A-Za-z0-9_.:/@+-]{1,128}$`)
 	refRe          = regexp.MustCompile(`^([a-z][a-z0-9_]{0,40})\.([A-Za-z_][A-Za-z0-9_-]{0,63})$`)
+	// module.<instance>[.module.<child>[key]]*.<type>.<name>[key]
+	importToRe = regexp.MustCompile(`^module\.([a-z][a-z0-9_]{0,40})(\.module\.[A-Za-z_][A-Za-z0-9_-]{0,63}(\[(\d{1,4}|"[A-Za-z0-9_.:/@-]{1,128}")\])?){0,4}\.[a-z][a-z0-9_]{0,63}\.[A-Za-z_][A-Za-z0-9_-]{0,63}(\[(\d{1,4}|"[A-Za-z0-9_.:/@-]{1,128}")\])?$`)
+	importIDRe = regexp.MustCompile(`^[\x21-\x7e]+$`)
 )
 
 // Stack is what a user submits. It contains no expressions and no HCL.
 type Stack struct {
 	Modules []ModuleRef `json:"modules"`
 	Outputs []Output    `json:"outputs,omitempty"`
+	// Imports adopt existing cloud resources into a module's state
+	// ("backporting"): instead of creating them, the plan imports them.
+	Imports []Import `json:"imports,omitempty"`
+}
+
+// Import names an address inside one of the stack's module instances and the
+// cloud ID of the existing resource to adopt there.
+type Import struct {
+	To string `json:"to"`
+	ID string `json:"id"`
 }
 
 type ModuleRef struct {
@@ -132,6 +146,24 @@ func (s *Stack) Validate(cat *catalog.Catalog, cloud string) error {
 				add("module %q: input %q is required", m.Name, in.Name)
 			}
 		}
+	}
+	if len(s.Imports) > maxImports {
+		add("a stack may import at most %d resources at once", maxImports)
+	}
+	seenTo := map[string]bool{}
+	for _, im := range s.Imports {
+		m := importToRe.FindStringSubmatch(im.To)
+		switch {
+		case m == nil:
+			add("import %q: to must be an address inside a module, e.g. module.network.aws_vpc.this[0]", im.To)
+		case instances[m[1]] == nil:
+			add("import %q: no module named %q in this stack", im.To, m[1])
+		case seenTo[im.To]:
+			add("import %q: duplicate address", im.To)
+		case len(im.ID) > 2048 || !importIDRe.MatchString(im.ID) || hasTemplate(im.ID):
+			add("import %q: id must be the resource's literal cloud ID (no spaces or template sequences)", im.To)
+		}
+		seenTo[im.To] = true
 	}
 	outNames := map[string]bool{}
 	for _, o := range s.Outputs {

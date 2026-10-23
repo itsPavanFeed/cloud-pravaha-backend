@@ -27,3 +27,10 @@ func TestPolicy(t *testing.T) {
 		t.Error("destroy must be blocked when the environment disallows it")
 	}
 }
+
+func TestImportThatDestroys(t *testing.T) {
+	r := Evaluate(Summary{Replace: 1, Imports: 1, Resources: []ResourceChange{{Address: "a", Type: "random_string", Actions: []string{"delete", "create"}, Importing: true}}}, Limits{MaxDestroys: 10})
+	if r.Passed || r.Violations[0].Rule != "import-destroys" {
+		t.Fatalf("an import that destroys the adopted resource must be blocked: %+v", r)
+	}
+}

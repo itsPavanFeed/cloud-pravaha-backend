@@ -197,3 +197,29 @@ func TestPhaseCredentials(t *testing.T) {
 		t.Fatal("plan roles need oidc auth on AWS")
 	}
 }
+
+func TestImports(t *testing.T) {
+	cat := testCatalog(t)
+	ok := mustDecode(t, `{"modules":[{"name":"vpc","module":"aws-vpc","inputs":{"name":"main"}}],
+		"imports":[{"to":"module.vpc.aws_vpc.this[0]","id":"vpc-0123456789abcdef0"},{"to":"module.vpc.module.flow.aws_iam_role.this[\"x\"]","id":"role-x"}]}`)
+	cloud := &Cloud{Provider: "aws", Auth: "oidc", AWS: &AWSCloud{Region: "eu-west-1", RoleARN: "arn:aws:iam::123456789012:role/r"}}
+	gen, err := ok.Generate(cat, GenerateInput{StackName: "n", Environment: "e", Cloud: cloud, TofuVersion: "1.13.2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(gen.Files[ConfigFile]), `"to": "module.vpc.aws_vpc.this[0]"`) {
+		t.Fatal("import block not generated")
+	}
+	for _, bad := range []string{
+		`{"to":"aws_vpc.root","id":"vpc-1"}`,                     // outside any module
+		`{"to":"module.nope.aws_vpc.this","id":"vpc-1"}`,         // unknown instance
+		`{"to":"module.vpc.aws_vpc.this","id":"${file(\"x\")}"}`, // template in id
+		`{"to":"module.vpc.aws_vpc.this","id":"has space"}`,      // not a literal ID
+		`{"to":"module.vpc.aws_vpc.this[var.x]","id":"vpc-1"}`,   // expression index
+	} {
+		st := mustDecode(t, `{"modules":[{"name":"vpc","module":"aws-vpc","inputs":{"name":"main"}}],"imports":[`+bad+`]}`)
+		if st.Validate(cat, "aws") == nil {
+			t.Errorf("accepted bad import %s", bad)
+		}
+	}
+}

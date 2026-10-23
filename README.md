@@ -51,6 +51,16 @@ Cloud Pravaha is a multi-tenant OpenTofu platform that deploys only **pinned pub
   | medium | production environment, in-place changes, network resources, or more than 25 changes | manager + finops |
   | high | deletions or replacements, destroy runs, identity and access changes, or network exposure in production | manager + finops + security |
 
+## Backporting: importing existing resources
+
+A stack spec can list `imports`: an address inside one of the stack's catalog modules and the cloud ID of a resource that already exists. The platform generates OpenTofu `import` blocks, so the plan adopts those resources into the module's state instead of creating them.
+
+```json
+"imports": [{ "to": "module.network.aws_vpc.this[0]", "id": "vpc-0a1b2c3d4e5f67890" }]
+```
+
+Imports raise risk to at least medium. A new hard policy rule, `import-destroys`, blocks any import the plan would delete or replace. That happens when the module's inputs don't match the existing resource; fix the inputs and plan again.
+
 ## How a change flows
 
 1. **Spec.** A developer submits a stack spec listing catalog modules, literal inputs and `{"$ref": "module.output"}` wiring. Anything outside the catalog, version ranges, `${…}`/`%{…}` templates and unknown fields are rejected.
@@ -182,7 +192,7 @@ See [SECURITY.md](SECURITY.md) for the security controls and how they map to com
 This build covers the tenancy core of the platform design. Coming next:
 - Git integration and a contracts repository per tenant, with pull-based auto-deploy
 - Temporal workflows and per-tenant buckets
-- Backporting: importing existing cloud resources into IaC
+- Resource discovery for backporting (listing a cloud account's resources to suggest imports)
 - LLM integration with RAG
 - SSO
 - OPA policy sets

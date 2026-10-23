@@ -462,6 +462,7 @@ type planJSON struct {
 		Mode    string `json:"mode"`
 		Change  struct {
 			Actions        []string `json:"actions"`
+			Importing      any      `json:"importing"`
 			After          any      `json:"after"`
 			AfterSensitive any      `json:"after_sensitive"`
 			AfterUnknown   any      `json:"after_unknown"`
@@ -480,6 +481,13 @@ func Summarize(b []byte) (policy.Summary, error) {
 	s := policy.Summary{Resources: []policy.ResourceChange{}}
 	for _, rc := range p.ResourceChanges {
 		a := rc.Change.Actions
+		importing := rc.Change.Importing != nil
+		if importing {
+			s.Imports++
+			if len(a) == 1 && a[0] == "no-op" {
+				a = []string{"import"}
+			}
+		}
 		if rc.Mode == "data" || len(a) == 0 || a[0] == "no-op" || a[0] == "read" {
 			continue
 		}
@@ -493,7 +501,7 @@ func Summarize(b []byte) (policy.Summary, error) {
 		case a[0] == "delete":
 			s.Destroy++
 		}
-		ch := policy.ResourceChange{Address: rc.Address, Type: rc.Type, Actions: a}
+		ch := policy.ResourceChange{Address: rc.Address, Type: rc.Type, Actions: a, Importing: importing}
 		if m, ok := scrub(rc.Change.After, rc.Change.AfterSensitive, rc.Change.AfterUnknown).(map[string]any); ok {
 			if enc, _ := json.Marshal(m); len(enc) <= 8<<10 {
 				ch.After = m

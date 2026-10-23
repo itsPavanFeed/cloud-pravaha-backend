@@ -27,3 +27,17 @@ func TestSummarizeDropsSensitiveValues(t *testing.T) {
 		t.Fatalf("bad summary: %s", b)
 	}
 }
+
+func TestSummarizeImports(t *testing.T) {
+	plan := `{"resource_changes":[
+	 {"address":"module.n.random_string.a","type":"random_string","mode":"managed","change":{"actions":["no-op"],"importing":{"id":"x"}}},
+	 {"address":"module.n.random_string.b","type":"random_string","mode":"managed","change":{"actions":["delete","create"],"importing":{"id":"y"}}}
+	]}`
+	s, err := Summarize([]byte(plan))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Imports != 2 || s.Resources[0].Actions[0] != "import" || !s.Resources[1].Importing || !s.HasChanges() {
+		t.Fatalf("bad import summary: %+v", s)
+	}
+}

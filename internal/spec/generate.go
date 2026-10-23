@@ -111,6 +111,13 @@ func (s *Stack) Generate(cat *catalog.Catalog, in GenerateInput) (*Generated, er
 	if len(provCfg) > 0 {
 		cfg["provider"] = provCfg
 	}
+	if len(s.Imports) > 0 {
+		var imps []map[string]string
+		for _, im := range s.Imports {
+			imps = append(imps, map[string]string{"to": im.To, "id": im.ID})
+		}
+		cfg["import"] = imps
+	}
 	if len(s.Outputs) > 0 {
 		outs := map[string]any{}
 		for _, o := range s.Outputs {

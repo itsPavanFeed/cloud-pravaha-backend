@@ -11,10 +11,11 @@ import (
 )
 
 type ResourceChange struct {
-	Address string         `json:"address"`
-	Type    string         `json:"type"`
-	Actions []string       `json:"actions"`
-	After   map[string]any `json:"after,omitempty"` // sensitive and unknown values removed
+	Address   string         `json:"address"`
+	Type      string         `json:"type"`
+	Actions   []string       `json:"actions"`
+	Importing bool           `json:"importing,omitempty"` // adopted from an existing cloud resource
+	After     map[string]any `json:"after,omitempty"`     // sensitive and unknown values removed
 }
 
 type Summary struct {
@@ -27,7 +28,7 @@ type Summary struct {
 	Outputs   []string         `json:"outputs,omitempty"`
 }
 
-func (s *Summary) HasChanges() bool { return s.Add+s.Change+s.Destroy+s.Replace > 0 }
+func (s *Summary) HasChanges() bool { return s.Add+s.Change+s.Destroy+s.Replace+s.Imports > 0 }
 
 type Violation struct {
 	Rule    string `json:"rule"`
@@ -70,6 +71,10 @@ func Evaluate(s Summary, l Limits) Result {
 			Message: fmt.Sprintf("plan deletes %d resources; this environment allows at most %d per run", deletes, l.MaxDestroys)})
 	}
 	for _, r := range s.Resources {
+		if r.Importing && has(r.Actions, "delete") {
+			v = append(v, Violation{Rule: "import-destroys", Level: "hard", Address: r.Address,
+				Message: "importing this resource would delete or replace it; align the module inputs with the existing resource first"})
+		}
 		creating := has(r.Actions, "create") || has(r.Actions, "update")
 		if why, bad := forbiddenTypes[r.Type]; bad && creating {
 			v = append(v, Violation{Rule: "forbidden-resource", Level: "hard", Address: r.Address, Message: r.Type + ": " + why})
