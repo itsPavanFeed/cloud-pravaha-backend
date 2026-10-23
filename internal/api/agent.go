@@ -40,6 +40,9 @@ type Job struct {
 	OIDCToken   string            `json:"oidc_token,omitempty"`
 	PlanSHA256  string            `json:"plan_sha256,omitempty"`
 	Catalog     JobCatalog        `json:"catalog"` // used by runners that do not pin their own catalog
+	// Phase-specific cloud identity: plan and apply may use different roles.
+	CloudEnv   map[string]string `json:"cloud_env,omitempty"`
+	CloudFiles map[string][]byte `json:"cloud_files,omitempty"`
 }
 
 type JobCatalog struct {
@@ -116,6 +119,7 @@ func (s *Server) startJob(w http.ResponseWriter, r *http.Request, run *store.Run
 	if phase == "apply" {
 		job.PlanSHA256 = deref(run.PlanSHA256)
 	}
+	job.CloudEnv, job.CloudFiles = cloud.PhaseCredentials(st.Name, phase)
 	if cloud.NeedsOIDCToken() {
 		job.OIDCToken, err = s.issuer.Sign(oidc.Claims{
 			Subject: oidc.Subject(env.Name, st.Name, phase), Audience: cloud.Audience(),

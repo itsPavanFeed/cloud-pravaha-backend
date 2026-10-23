@@ -78,12 +78,12 @@ func TestEnforcedBaselineAndReferences(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(gen.Files[ConfigFile])
-	for _, want := range []string{`"enable_flow_log": true`, `"vpc_id": "${module.vpc.vpc_id}"`, `"web_identity_token_file": ".pravaha/oidc-token"`, `"managed-by": "cloud-pravaha"`} {
+	for _, want := range []string{`"enable_flow_log": true`, `"vpc_id": "${module.vpc.vpc_id}"`, `"skip_metadata_api_check": true`, `"managed-by": "cloud-pravaha"`} {
 		if !strings.Contains(s, want) {
 			t.Errorf("generated config is missing %s\n%s", want, s)
 		}
 	}
-	for _, bad := range []string{"access_key", "secret_key", "profile"} {
+	for _, bad := range []string{"access_key", "secret_key", "profile", "arn:aws:iam"} {
 		if strings.Contains(s, bad) {
 			t.Errorf("generated config must never contain %q", bad)
 		}
@@ -168,5 +168,32 @@ func TestConfigHashChangesWithEnvironment(t *testing.T) {
 	c, _ := st.Generate(cat, in("us-east-1"))
 	if a.Hash != b.Hash || a.Hash == c.Hash {
 		t.Fatal("config hash must be deterministic and change when the environment changes")
+	}
+}
+
+func TestPhaseCredentials(t *testing.T) {
+	c, err := DecodeCloud([]byte(`{"provider":"aws","auth":"oidc","aws":{"region":"eu-west-1","role_arn":"arn:aws:iam::123456789012:role/deployer","plan_role_arn":"arn:aws:iam::123456789012:role/reader"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, _ := c.PhaseCredentials("net", "plan")
+	apply, _ := c.PhaseCredentials("net", "apply")
+	if plan["AWS_ROLE_ARN"] != "arn:aws:iam::123456789012:role/reader" || apply["AWS_ROLE_ARN"] != "arn:aws:iam::123456789012:role/deployer" ||
+		plan["AWS_WEB_IDENTITY_TOKEN_FILE"] != TokenFile {
+		t.Fatalf("plan %v apply %v", plan, apply)
+	}
+	for k := range plan {
+		if !PhaseEnvAllowed[k] {
+			t.Errorf("%s is not on the runner allowlist", k)
+		}
+	}
+	g, _ := DecodeCloud([]byte(`{"provider":"gcp","auth":"oidc","gcp":{"project_id":"my-proj-1","region":"europe-west1","service_account_email":"deployer@my-proj-1.iam.gserviceaccount.com","plan_service_account_email":"reader@my-proj-1.iam.gserviceaccount.com","workload_identity_provider":"projects/123/locations/global/workloadIdentityPools/pravaha/providers/pravaha"}}`))
+	_, pf := g.PhaseCredentials("net", "plan")
+	_, af := g.PhaseCredentials("net", "apply")
+	if !strings.Contains(string(pf[GCPExternalFile]), "reader@") || !strings.Contains(string(af[GCPExternalFile]), "deployer@") {
+		t.Fatal("GCP plan and apply must impersonate different service accounts")
+	}
+	if _, err := DecodeCloud([]byte(`{"provider":"aws","auth":"ambient","aws":{"region":"eu-west-1","role_arn":"arn:aws:iam::123456789012:role/d","plan_role_arn":"arn:aws:iam::123456789012:role/r"}}`)); err == nil {
+		t.Fatal("plan roles need oidc auth on AWS")
 	}
 }

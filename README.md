@@ -187,4 +187,3 @@ This build covers the tenancy core of the platform design. Coming next:
 - SSO
 - OPA policy sets
 - Helm charts
-- Separate plan and apply cloud roles

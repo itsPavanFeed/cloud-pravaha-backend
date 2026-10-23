@@ -258,6 +258,14 @@ func (j *job) writeFiles() error {
 			return err
 		}
 	}
+	for name, data := range j.CloudFiles {
+		if name != spec.GCPExternalFile {
+			return fmt.Errorf("job contains unexpected credential file %q", name)
+		}
+		if err := os.WriteFile(filepath.Join(j.dir, name), data, 0o600); err != nil {
+			return err
+		}
+	}
 	// Provider installation is restricted to the allowlist, so even a module that
 	// slipped past validation could not install an arbitrary provider.
 	var inc []string
@@ -309,6 +317,20 @@ plan {
 	}
 	if j.r.caPEM != "" {
 		j.env = append(j.env, "TF_HTTP_CLIENT_CA_CERTIFICATE_PEM="+j.r.caPEM)
+	}
+	// Phase identity from the control plane: only allowlisted variables, so a
+	// compromised control plane cannot inject OpenTofu options (TF_CLI_ARGS, ...).
+	for k, v := range j.CloudEnv {
+		if !spec.PhaseEnvAllowed[k] || strings.ContainsAny(v, "\x00\n") {
+			return fmt.Errorf("job sets environment variable %q, which runners do not accept", k)
+		}
+		if strings.HasSuffix(k, "_FILE") {
+			if v != spec.TokenFile {
+				return fmt.Errorf("job points %s outside the run directory", k)
+			}
+			v = filepath.Join(j.dir, v)
+		}
+		j.env = append(j.env, k+"="+v)
 	}
 	if j.r.cfg.PluginCache != "" {
 		// Safe to share: init verifies every provider against the lock file hashes.

@@ -36,6 +36,7 @@ The mapping helps your own audit evidence. It is not a certification: SOC 2, ISO
 | 26 | **Risk-based approvals.** Plans are classified low, medium or high, which requires manager; manager + finops; or manager + finops + security. Production tiers, deletions, IAM and network exposure raise the risk | `internal/risk` | `risk_test.go`, e2e |
 | 27 | **Platform admin scope.** Platform admins act as tenant admin and auditor in every tenant and can author stacks and runs in any unit. They cannot sign approval steps without an explicit membership, so separation of duties holds. Their actions in a tenant are audited as `platform-admin:<email>`. Tenant admins cannot mint tokens for people who also belong to another tenant | `identity`, `central` | `identity_test.go`, e2e |
 | 28 | **Per-tenant cloud trust.** Each tenant plane is its own OIDC issuer, so a cloud trusts only its own tenant's runs, never central | `oidc`, `api` | e2e |
+| 29 | **Least-privilege phases.** Connections can name a read-only identity for plans. Identities are handed to the runner per phase (never written into the generated config), from an allowlist of variables the runner accepts, so a control plane cannot inject OpenTofu options. Run tokens carry `phase:plan` or `phase:apply` for cloud trust policies | `spec.PhaseCredentials`, `runner.buildEnv` | `TestPhaseCredentials` |
 
 ## Compliance mapping
 

@@ -167,12 +167,10 @@ func providerConfig(in GenerateInput, used map[string]catalog.Provider, files ma
 			"default_tags": map[string]any{"tags": tags},
 		}
 		if c.Auth == "oidc" {
-			p["assume_role_with_web_identity"] = map[string]any{
-				"role_arn":                c.AWS.RoleARN,
-				"session_name":            session,
-				"web_identity_token_file": TokenFile,
-				"duration":                "1h",
-			}
+			// Web identity comes from AWS_ROLE_ARN / AWS_WEB_IDENTITY_TOKEN_FILE
+			// set per phase by the runner (see PhaseCredentials); never fall
+			// back to instance metadata credentials.
+			p["skip_metadata_api_check"] = true
 		} else {
 			ar := map[string]any{"role_arn": c.AWS.RoleARN, "session_name": session, "duration": "1h"}
 			if c.AWS.ExternalID != "" {
@@ -189,20 +187,8 @@ func providerConfig(in GenerateInput, used map[string]catalog.Provider, files ma
 			"add_terraform_attribution_label": true,
 		}
 		if c.Auth == "oidc" {
-			ext := map[string]any{
-				"type":                              "external_account",
-				"audience":                          c.Audience(),
-				"subject_token_type":                "urn:ietf:params:oauth:token-type:jwt",
-				"token_url":                         "https://sts.googleapis.com/v1/token",
-				"credential_source":                 map[string]any{"file": TokenFile},
-				"service_account_impersonation_url": "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/" + c.GCP.ServiceAccountEmail + ":generateAccessToken",
-			}
-			b, _ := json.MarshalIndent(ext, "", "  ")
-			files[GCPExternalFile] = b
-			p["credentials"] = GCPExternalFile
-		} else {
-			p["impersonate_service_account"] = c.GCP.ServiceAccountEmail
-		}
+			p["credentials"] = GCPExternalFile // written per phase by the runner
+		} // ambient: GOOGLE_IMPERSONATE_SERVICE_ACCOUNT is set per phase
 		for _, src := range []string{"hashicorp/google", "hashicorp/google-beta"} {
 			if has(src) {
 				out[src[strings.Index(src, "/")+1:]] = p
@@ -210,10 +196,9 @@ func providerConfig(in GenerateInput, used map[string]catalog.Provider, files ma
 		}
 	case "azure":
 		if has("azure/azapi") {
-			p := map[string]any{
+			p := map[string]any{ // client_id comes from ARM_CLIENT_ID per phase
 				"tenant_id":       c.Azure.TenantID,
 				"subscription_id": c.Azure.SubscriptionID,
-				"client_id":       c.Azure.ClientID,
 				"use_cli":         false,
 			}
 			if c.Auth == "oidc" {

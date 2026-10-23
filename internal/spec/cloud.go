@@ -28,15 +28,17 @@ type Cloud struct {
 }
 
 type AWSCloud struct {
-	Region     string `json:"region"`
-	RoleARN    string `json:"role_arn"`
-	ExternalID string `json:"external_id,omitempty"` // ambient mode only
+	Region      string `json:"region"`
+	RoleARN     string `json:"role_arn"`                // apply role (and plan role unless PlanRoleARN is set)
+	PlanRoleARN string `json:"plan_role_arn,omitempty"` // optional read-only role for plans (oidc mode)
+	ExternalID  string `json:"external_id,omitempty"`   // ambient mode only
 }
 
 type GCPCloud struct {
 	ProjectID                string `json:"project_id"`
 	Region                   string `json:"region"`
 	ServiceAccountEmail      string `json:"service_account_email"`
+	PlanServiceAccountEmail  string `json:"plan_service_account_email,omitempty"` // optional read-only account for plans
 	WorkloadIdentityProvider string `json:"workload_identity_provider,omitempty"` // oidc mode
 }
 
@@ -44,6 +46,7 @@ type AzureCloud struct {
 	TenantID       string `json:"tenant_id"`
 	SubscriptionID string `json:"subscription_id"`
 	ClientID       string `json:"client_id"`
+	PlanClientID   string `json:"plan_client_id,omitempty"` // optional read-only identity for plans
 }
 
 var (
@@ -95,6 +98,9 @@ func (c *Cloud) Validate() error {
 		if !roleARNRe.MatchString(c.AWS.RoleARN) {
 			add("aws.role_arn must be an IAM role ARN")
 		}
+		if c.AWS.PlanRoleARN != "" && (c.Auth != "oidc" || !roleARNRe.MatchString(c.AWS.PlanRoleARN)) {
+			add("aws.plan_role_arn must be an IAM role ARN and needs oidc auth")
+		}
 		if c.AWS.ExternalID != "" && (c.Auth != "ambient" || !extIDRe.MatchString(c.AWS.ExternalID)) {
 			add("aws.external_id is only valid in ambient mode and must be 2-1000 safe characters")
 		}
@@ -109,6 +115,9 @@ func (c *Cloud) Validate() error {
 		if !gcpSARe.MatchString(c.GCP.ServiceAccountEmail) {
 			add("gcp.service_account_email must be a service account email")
 		}
+		if c.GCP.PlanServiceAccountEmail != "" && !gcpSARe.MatchString(c.GCP.PlanServiceAccountEmail) {
+			add("gcp.plan_service_account_email must be a service account email")
+		}
 		if c.Auth == "oidc" && !gcpWIPRe.MatchString(c.GCP.WorkloadIdentityProvider) {
 			add("gcp.workload_identity_provider must be projects/N/locations/global/workloadIdentityPools/P/providers/X")
 		}
@@ -117,7 +126,10 @@ func (c *Cloud) Validate() error {
 			add("azure settings required (and only azure)")
 			break
 		}
-		for k, v := range map[string]string{"tenant_id": c.Azure.TenantID, "subscription_id": c.Azure.SubscriptionID, "client_id": c.Azure.ClientID} {
+		for k, v := range map[string]string{"tenant_id": c.Azure.TenantID, "subscription_id": c.Azure.SubscriptionID, "client_id": c.Azure.ClientID, "plan_client_id": c.Azure.PlanClientID} {
+			if k == "plan_client_id" && v == "" {
+				continue
+			}
 			if !uuidRe.MatchString(v) {
 				add("azure.%s must be a UUID", k)
 			}
@@ -143,3 +155,55 @@ func (c *Cloud) Audience() string {
 
 // NeedsOIDCToken reports whether runs in this environment need a platform-issued token.
 func (c *Cloud) NeedsOIDCToken() bool { return c.Provider != "none" && c.Auth == "oidc" }
+
+// PhaseCredentials returns the environment variables and files a runner sets
+// for one phase of a run. Identities live here, not in the generated config,
+// because a saved plan carries its provider configuration into the apply: this
+// is what lets plans run as a read-only identity and applies as the deployer.
+// File paths are relative to the run's working directory.
+func (c *Cloud) PhaseCredentials(stack, phase string) (map[string]string, map[string][]byte) {
+	env, files := map[string]string{}, map[string][]byte{}
+	pick := func(apply, plan string) string {
+		if phase == "plan" && plan != "" {
+			return plan
+		}
+		return apply
+	}
+	session := "pravaha-" + phase + "-" + stack
+	if len(session) > 64 {
+		session = session[:64]
+	}
+	switch c.Provider {
+	case "aws":
+		if c.Auth == "oidc" {
+			env["AWS_ROLE_ARN"] = pick(c.AWS.RoleARN, c.AWS.PlanRoleARN)
+			env["AWS_WEB_IDENTITY_TOKEN_FILE"] = TokenFile
+			env["AWS_ROLE_SESSION_NAME"] = session
+		}
+	case "gcp":
+		sa := pick(c.GCP.ServiceAccountEmail, c.GCP.PlanServiceAccountEmail)
+		if c.Auth == "oidc" {
+			ext := map[string]any{
+				"type":                              "external_account",
+				"audience":                          c.Audience(),
+				"subject_token_type":                "urn:ietf:params:oauth:token-type:jwt",
+				"token_url":                         "https://sts.googleapis.com/v1/token",
+				"credential_source":                 map[string]any{"file": TokenFile},
+				"service_account_impersonation_url": "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/" + sa + ":generateAccessToken",
+			}
+			b, _ := json.MarshalIndent(ext, "", "  ")
+			files[GCPExternalFile] = b
+		} else {
+			env["GOOGLE_IMPERSONATE_SERVICE_ACCOUNT"] = sa
+		}
+	case "azure":
+		env["ARM_CLIENT_ID"] = pick(c.Azure.ClientID, c.Azure.PlanClientID)
+	}
+	return env, files
+}
+
+// PhaseEnvAllowed is the only environment a control plane may hand a runner.
+var PhaseEnvAllowed = map[string]bool{
+	"AWS_ROLE_ARN": true, "AWS_WEB_IDENTITY_TOKEN_FILE": true, "AWS_ROLE_SESSION_NAME": true,
+	"GOOGLE_IMPERSONATE_SERVICE_ACCOUNT": true, "ARM_CLIENT_ID": true,
+}
