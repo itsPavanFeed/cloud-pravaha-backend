@@ -259,7 +259,7 @@ func (s *Server) applyContract(ctx context.Context, cfg *contracts.Config, c con
 		if run, err := s.store.CreateRun(ctx, existing.ID, "apply", actor, gen.Hash); err == nil {
 			res.RunID = run.ID
 			s.audit(ctx, actor, "run.create", "run/"+run.ID, existing.BU, map[string]string{"stack": existing.Name, "operation": "apply", "source_ref": rev})
-			s.notify()
+			s.runCreated(ctx, run.ID)
 		}
 	}
 	return res
@@ -285,6 +285,7 @@ func (s *Server) autoApplyLowRisk(ctx context.Context, run *store.Run, rk risk.R
 		}
 		s.audit(ctx, approver, "run.approve", "run/"+run.ID, run.BU, map[string]any{"step": step, "auto": true, "chain_complete": complete})
 		if complete {
+			s.engine.Approved(ctx, run.ID)
 			s.notify()
 		}
 	}

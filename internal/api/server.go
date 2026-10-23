@@ -27,6 +27,7 @@ import (
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/httpx"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/identity"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/oidc"
+	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/orchestrator"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/secure"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/store"
 )
@@ -44,6 +45,7 @@ type Server struct {
 	limiter *httpx.Limiter
 	central *centralKeys
 	objects *blob.S3 // tenant bucket for state and plans; nil = keep them in PostgreSQL
+	engine  orchestrator.Engine
 	wakeMu  sync.Mutex
 	wake    chan struct{} // closed to nudge long-polling runners when work is queued
 }
@@ -54,7 +56,7 @@ func New(cfg *config.Server, st *store.Store, cat *catalog.Catalog, sealer *secu
 		return nil, err
 	}
 	srv := &Server{cfg: cfg, store: st, catalog: cat, sealer: sealer, issuer: iss, log: log, central: ck,
-		limiter: httpx.NewLimiter(10, time.Minute, 5*time.Minute), wake: make(chan struct{})}
+		limiter: httpx.NewLimiter(10, time.Minute, 5*time.Minute), wake: make(chan struct{}), engine: orchestrator.Builtin{}}
 	if cfg.BucketURL != "" {
 		bc, err := blob.ParseURL(cfg.BucketURL, cfg.BucketAccessKey, cfg.BucketSecretKey)
 		if err != nil {
@@ -148,8 +150,26 @@ func (s *Server) Run(ctx context.Context) error {
 		return errors.New("PRAVAHA_CENTRAL_CLIENT_CA contains no certificates")
 	}
 	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12, ClientAuth: tls.VerifyClientCertIfGiven, ClientCAs: pool}
+	if s.cfg.TemporalAddress != "" {
+		t, err := orchestrator.NewTemporal(orchestrator.TemporalConfig{
+			Address: s.cfg.TemporalAddress, Namespace: s.cfg.TemporalNamespace,
+			TaskQueue: "pravaha-" + s.cfg.Tenant, Timeouts: orchestrator.DefaultTimeouts,
+		}, &orchestrator.Activities{Store: orchStore{s}, OnQueue: func(ctx context.Context, ids []string) {
+			for _, id := range ids {
+				s.engine.RunCreated(ctx, id)
+			}
+			s.notify()
+		}}, func(msg string, args ...any) { s.log.Warn(msg, args...) })
+		if err != nil {
+			return fmt.Errorf("connecting to Temporal at %s: %w", s.cfg.TemporalAddress, err)
+		}
+		defer t.Close()
+		s.engine = t
+		s.log.Info("run lifecycles are orchestrated by Temporal", "address", s.cfg.TemporalAddress, "task_queue", "pravaha-"+s.cfg.Tenant)
+	} else {
+		go s.driftScheduler(ctx)
+	}
 	go s.reaper(ctx)
-	go s.driftScheduler(ctx)
 	go s.contractsSyncer(ctx)
 	s.log.Info("tenant plane serving HTTPS", "tenant", s.cfg.Tenant, "listen", s.cfg.Listen, "central", s.cfg.CentralURL)
 	return httpx.Serve(ctx, s.log, s.cfg.Listen, s.Handler(), tlsCfg, s.cfg.TLSCert, s.cfg.TLSKey)
@@ -163,18 +183,41 @@ func (s *Server) reaper(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			ids, err := s.store.Reap(ctx, 15*time.Minute, 24*time.Hour)
-			if err != nil {
-				s.log.Error("reaper", "err", err)
-				continue
-			}
-			for _, id := range ids {
-				s.audit(ctx, "system", "run.reaped", "run/"+id, "", nil)
+			if s.engine.Name() == "builtin" { // Temporal owns run timers otherwise
+				ids, err := s.store.Reap(ctx, 15*time.Minute, 24*time.Hour)
+				if err != nil {
+					s.log.Error("reaper", "err", err)
+					continue
+				}
+				for _, id := range ids {
+					s.audit(ctx, "system", "run.reaped", "run/"+id, "", nil)
+				}
 			}
 			s.store.ReleaseRunLocks(ctx)
 			s.cleanupPlans(ctx)
 		}
 	}
+}
+
+// orchStore adapts the tenant plane for workflow activities.
+type orchStore struct{ s *Server }
+
+func (o orchStore) Expire(ctx context.Context, runID string, from []string, to, reason string) (bool, error) {
+	moved, err := o.s.store.Expire(ctx, runID, from, to, reason)
+	if moved {
+		o.s.audit(ctx, "system:temporal", "run.expired", "run/"+runID, "", map[string]string{"status": to, "reason": reason})
+	}
+	return moved, err
+}
+
+func (o orchStore) QueueDueDrift(ctx context.Context) ([]string, error) {
+	return o.s.queueDueDrift(ctx), nil
+}
+
+// runCreated wakes runners and starts the run's lifecycle in the engine.
+func (s *Server) runCreated(ctx context.Context, runID string) {
+	s.engine.RunCreated(ctx, runID)
+	s.notify()
 }
 
 func (s *Server) notify() {

@@ -169,6 +169,7 @@ Secrets can be given directly or as `NAME_FILE` pointing to a mounted secret.
 | `PRAVAHA_CENTRAL_CA_FILE`, `PRAVAHA_CENTRAL_JWKS_FILE` | Optional: CA for central's TLS; a static JWKS instead of fetching it |
 | `PRAVAHA_CATALOG_DIR`, `PRAVAHA_TOFU_VERSION` | Catalog directory; exact OpenTofu version (default `1.13.2`) |
 | `PRAVAHA_BUCKET_URL` | Optional tenant bucket for state versions and saved plans: `s3://bucket[/prefix]?endpoint=https://…&region=…` (AWS S3, MinIO, Ceph, SeaweedFS, GCS interoperability). The database then keeps only keys and checksums |
+| `PRAVAHA_TEMPORAL_ADDRESS`, `PRAVAHA_TEMPORAL_NAMESPACE` | Optional Temporal frontend (`host:7233`) and namespace. With it, each run is a durable workflow `run-<id>` that owns its timers (planning silence, approval expiry, apply timeout), and drift checks come from a cron workflow on task queue `pravaha-<tenant>`. Without it, the built-in database reaper and scheduler do the same |
 | `PRAVAHA_BUCKET_ACCESS_KEY`, `PRAVAHA_BUCKET_SECRET_KEY` | Bucket credentials (use `_FILE` variants); `PRAVAHA_BUCKET_CREATE=1` creates the bucket on start |
 
 **Runner:** `PRAVAHA_SERVER_URL` (its tenant plane), `PRAVAHA_RUNNER_TOKEN`, `PRAVAHA_STATE_KEY` (32+ characters, shared by the pool, never seen by any plane), `PRAVAHA_CA_FILE`, `PRAVAHA_CATALOG_DIR` (pins the catalog locally), `PRAVAHA_PLUGIN_CACHE_DIR`, `PRAVAHA_WORK_DIR`.
@@ -221,7 +222,6 @@ See [SECURITY.md](SECURITY.md) for the security controls and how they map to com
 
 This build covers the tenancy core of the platform design. Coming next:
 - Pull-request plans: speculative plans posted back to Git pull requests
-- Temporal workflows
 - Resource discovery for backporting (listing a cloud account's resources to suggest imports)
 - LLM integration with RAG
 - SSO

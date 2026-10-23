@@ -634,6 +634,15 @@ func (s *Store) FinishRun(ctx context.Context, runID, status, errMsg string) err
 	return err
 }
 
+// Expire moves a run from one of the given statuses to a terminal one,
+// reporting whether it did (false if the run had already moved on).
+func (s *Store) Expire(ctx context.Context, runID string, from []string, to, reason string) (bool, error) {
+	tag, err := s.db.Exec(ctx, `UPDATE runs SET status = $3, error = $4, finished_at = now(), updated_at = now(),
+		run_token_hash = NULL, run_token_expires_at = NULL, plan_sealed = NULL
+		WHERE id::text = $1 AND status = ANY($2)`, runID, from, to, reason)
+	return err == nil && tag.RowsAffected() == 1, err
+}
+
 // Reap fails runs whose runner went silent and discards plans nobody approved in time.
 func (s *Store) Reap(ctx context.Context, silentFor, planTTL time.Duration) ([]string, error) {
 	rows, err := s.db.Query(ctx, `UPDATE runs SET

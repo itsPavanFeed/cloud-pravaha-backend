@@ -91,6 +91,7 @@ func (s *Server) startJob(w http.ResponseWriter, r *http.Request, run *store.Run
 	}
 	fail := func(msg string) {
 		s.store.FinishRun(ctx, run.ID, "failed", msg)
+		s.engine.Finished(ctx, run.ID)
 		s.audit(ctx, who(r).Subject(), "run.failed", "run/"+run.ID, run.BU, map[string]string{"error": msg})
 		w.WriteHeader(http.StatusNoContent)
 	}
@@ -244,6 +245,7 @@ func (s *Server) agentPlan(w http.ResponseWriter, r *http.Request) {
 		"policy_passed": res.Passed, "violations": len(res.Violations), "plan_sha256": up.SHA256, "state_serial": serial,
 		"risk": rk.Level, "required_approvals": rk.Steps, "monthly_cost_delta_usd": est.MonthlyDelta,
 	})
+	s.engine.Planned(ctx, run.ID, status == "planned")
 	if status == "planned" {
 		s.autoApplyLowRisk(ctx, run, rk)
 	}
@@ -276,15 +278,17 @@ func (s *Server) recordDrift(w http.ResponseWriter, r *http.Request, run *store.
 			if gen, _, probs := s.build(ctx, st.Name, env, st.Spec); probs == nil {
 				if fix, err := s.store.CreateRun(ctx, st.ID, "apply", "system:drift-remediation", gen.Hash); err == nil {
 					s.audit(ctx, "system:drift-remediation", "run.create", "run/"+fix.ID, st.BU, map[string]string{"stack": st.Name, "operation": "apply", "reason": "drift found by run " + run.ID})
-					s.notify()
+					s.runCreated(ctx, fix.ID)
 				}
 			}
 		}
 	}
+	s.engine.Planned(ctx, run.ID, false)
 	writeJSON(w, 200, map[string]any{"status": status, "drifted": drifted})
 }
 
-// driftScheduler queues refresh-only runs for stacks whose check is due.
+// driftScheduler queues refresh-only runs for stacks whose check is due
+// (built-in engine; with Temporal a cron workflow calls queueDueDrift).
 func (s *Server) driftScheduler(ctx context.Context) {
 	t := time.NewTicker(30 * time.Second)
 	defer t.Stop()
@@ -294,30 +298,38 @@ func (s *Server) driftScheduler(ctx context.Context) {
 			return
 		case <-t.C:
 		}
-		ids, err := s.store.DueForDrift(ctx)
-		if err != nil {
-			s.log.Error("drift scheduler", "err", err)
-			continue
-		}
-		for _, id := range ids {
-			st, err := s.store.GetStack(ctx, id)
-			if err != nil {
-				continue
-			}
-			env, err := s.store.GetEnvironment(ctx, st.EnvironmentID)
-			if err != nil {
-				continue
-			}
-			gen, _, probs := s.build(ctx, st.Name, env, st.Spec)
-			if probs != nil {
-				continue
-			}
-			if run, err := s.store.CreateRun(ctx, st.ID, "drift", "system:drift-schedule", gen.Hash); err == nil {
-				s.audit(ctx, "system:drift-schedule", "run.create", "run/"+run.ID, st.BU, map[string]string{"stack": st.Name, "operation": "drift"})
-				s.notify()
-			}
+		for _, id := range s.queueDueDrift(ctx) {
+			s.runCreated(ctx, id)
 		}
 	}
+}
+
+func (s *Server) queueDueDrift(ctx context.Context) []string {
+	ids, err := s.store.DueForDrift(ctx)
+	if err != nil {
+		s.log.Error("drift scheduler", "err", err)
+		return nil
+	}
+	var runs []string
+	for _, id := range ids {
+		st, err := s.store.GetStack(ctx, id)
+		if err != nil {
+			continue
+		}
+		env, err := s.store.GetEnvironment(ctx, st.EnvironmentID)
+		if err != nil {
+			continue
+		}
+		gen, _, probs := s.build(ctx, st.Name, env, st.Spec)
+		if probs != nil {
+			continue
+		}
+		if run, err := s.store.CreateRun(ctx, st.ID, "drift", "system:drift-schedule", gen.Hash); err == nil {
+			s.audit(ctx, "system:drift-schedule", "run.create", "run/"+run.ID, st.BU, map[string]string{"stack": st.Name, "operation": "drift"})
+			runs = append(runs, run.ID)
+		}
+	}
+	return runs
 }
 
 func planKey(runID string) string { return "plans/" + runID + ".sealed" }
@@ -396,6 +408,7 @@ func (s *Server) agentFinish(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreErr(w, err, "run already finished")
 		return
 	}
+	s.engine.Finished(r.Context(), run.ID)
 	s.cleanupPlans(context.WithoutCancel(r.Context()))
 	s.audit(r.Context(), who(r).Subject(), "run."+b.Status, "run/"+run.ID, run.BU, map[string]string{"stack": run.StackName, "error": b.Error})
 	w.WriteHeader(http.StatusNoContent)

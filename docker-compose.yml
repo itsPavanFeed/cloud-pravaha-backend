@@ -1,6 +1,7 @@
 # Evaluation install of the full topology:
 #   central   central plane: web UI, identity, tenant directory, routing   https://localhost:8443
 #   tenant    one tenant plane: its backend, database and state             (internal, mTLS from central)
+#   temporal  orchestrates the tenant's run lifecycles
 #   runner    executes OpenTofu for that tenant
 # In production the tenant plane and runner run in the client's own cloud;
 # central reaches the tenant over mTLS and only needs its URL and CA.
@@ -38,6 +39,18 @@ services:
       test: ["CMD", "pg_isready", "-U", "pravaha", "-d", "tenant"]
       interval: 3s
       retries: 30
+    networks: [internal]
+
+  # Temporal orchestrates run lifecycles (durable timers, drift cron). This is the
+  # single-binary dev server for evaluation; use a Temporal cluster or Temporal
+  # Cloud in production.
+  temporal:
+    image: temporalio/temporal:latest
+    command: ["server", "start-dev", "--ip", "0.0.0.0"]
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health", "--address", "127.0.0.1:7233"]
+      interval: 3s
+      retries: 40
     networks: [internal]
 
   # Development PKI: a local CA, server certificates for central and the tenant,
@@ -88,6 +101,7 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       certs-tenant: { condition: service_completed_successfully }
+      temporal: { condition: service_healthy }
     environment:
       PRAVAHA_DATABASE_URL: postgres://pravaha:${POSTGRES_PASSWORD}@postgres:5432/tenant?sslmode=disable
       PRAVAHA_MASTER_KEY: ${TENANT_MASTER_KEY:?set TENANT_MASTER_KEY in .env}
@@ -100,7 +114,9 @@ services:
       PRAVAHA_CENTRAL_ISSUER: ${PRAVAHA_PUBLIC_URL:-https://localhost:8443}  # the issuer central signs as
       PRAVAHA_CENTRAL_CA_FILE: /certs/ca.pem
       PRAVAHA_CENTRAL_CLIENT_CA: /certs/ca.pem
+      PRAVAHA_TEMPORAL_ADDRESS: temporal:7233
     volumes: ["certs:/certs:ro"]
+    restart: unless-stopped
     networks: [internal]
 
   runner:

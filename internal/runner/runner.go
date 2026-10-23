@@ -221,8 +221,17 @@ func (j *job) run(ctx context.Context, passphrase string) (err error) {
 		}
 	}
 	j.logs.Printf("==> tofu init (OpenTofu %s, %d allowlisted providers)\n", j.TofuVersion, len(j.Providers))
-	if err := j.tofu(ctx, "init", "-input=false", "-no-color"); err != nil {
-		return fmt.Errorf("tofu init failed: %w", err)
+	// init is idempotent; retry transient registry and network failures.
+	for attempt := 1; ; attempt++ {
+		err := j.tofu(ctx, "init", "-input=false", "-no-color")
+		if err == nil {
+			break
+		}
+		if attempt == 3 || ctx.Err() != nil {
+			return fmt.Errorf("tofu init failed: %w", err)
+		}
+		j.logs.Printf("==> tofu init failed (attempt %d of 3); retrying in %ds\n", attempt, attempt*5)
+		sleep(ctx, time.Duration(attempt*5)*time.Second)
 	}
 	j.logs.Printf("==> verifying downloaded modules and providers against the catalog\n")
 	if err := depcheck.Check(j.dir, j.catalog); err != nil {

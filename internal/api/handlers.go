@@ -445,7 +445,7 @@ func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r.Context(), p.Actor(), "run.create", "run/"+run.ID, st.BU, map[string]string{"stack": st.Name, "operation": b.Operation, "config_hash": gen.Hash})
-	s.notify()
+	s.runCreated(r.Context(), run.ID)
 	writeJSON(w, 201, run)
 }
 
@@ -557,6 +557,7 @@ func (s *Server) approveRun(w http.ResponseWriter, r *http.Request) {
 	}
 	if stale != "" {
 		s.store.Discard(r.Context(), run.ID, "stale plan: "+stale)
+		s.engine.Finished(r.Context(), run.ID)
 		s.audit(r.Context(), p.Actor(), "run.discard", "run/"+run.ID, run.BU, map[string]string{"reason": "stale plan: " + stale})
 		writeErr(w, http.StatusConflict, "plan is stale and was discarded: "+stale+"; start a new run")
 		return
@@ -576,6 +577,7 @@ func (s *Server) approveRun(w http.ResponseWriter, r *http.Request) {
 	s.audit(r.Context(), p.Actor(), "run.approve", "run/"+run.ID, run.BU, map[string]any{
 		"stack": st.Name, "step": b.Step, "reason": b.Reason, "plan_sha256": deref(run.PlanSHA256), "chain_complete": complete})
 	if complete {
+		s.engine.Approved(r.Context(), run.ID)
 		s.notify()
 	}
 	run, _ = s.store.GetRun(r.Context(), run.ID)
@@ -606,6 +608,7 @@ func (s *Server) discardRun(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreErr(w, err, "only queued or planned runs can be discarded")
 		return
 	}
+	s.engine.Finished(r.Context(), run.ID)
 	s.audit(r.Context(), p.Actor(), "run.discard", "run/"+run.ID, run.BU, map[string]string{"reason": b.Reason})
 	run, _ = s.store.GetRun(r.Context(), run.ID)
 	writeJSON(w, 200, run)

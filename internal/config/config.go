@@ -37,6 +37,9 @@ type Server struct {
 	BucketAccessKey string
 	BucketSecretKey string
 	BucketCreate    bool // create the bucket on start (development)
+
+	TemporalAddress   string // host:port of Temporal; empty = built-in orchestration
+	TemporalNamespace string
 }
 
 // Central configures the central plane: frontend, identity, tenant routing.
@@ -90,6 +93,9 @@ func LoadServer() (*Server, error) {
 		BucketAccessKey: secret("PRAVAHA_BUCKET_ACCESS_KEY"),
 		BucketSecretKey: secret("PRAVAHA_BUCKET_SECRET_KEY"),
 		BucketCreate:    os.Getenv("PRAVAHA_BUCKET_CREATE") == "1",
+
+		TemporalAddress:   os.Getenv("PRAVAHA_TEMPORAL_ADDRESS"),
+		TemporalNamespace: env("PRAVAHA_TEMPORAL_NAMESPACE", "default"),
 	}
 	var errs []error
 	errs = append(errs, common(c.DatabaseURL, c.MasterKey, c.PublicURL, false)...)
