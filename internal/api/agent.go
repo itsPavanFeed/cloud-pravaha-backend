@@ -12,6 +12,7 @@ import (
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/catalog"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/cost"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/oidc"
+	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/opapolicy"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/policy"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/redact"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/risk"
@@ -190,6 +191,14 @@ func (s *Server) agentPlan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res := policy.Evaluate(up.Summary, policy.Limits{MaxDestroys: env.MaxDestroys, AllowDestroy: env.AllowDestroy, Destroying: run.Operation == "destroy"})
+	if sets := s.tenantPolicies(ctx, run); len(sets) > 0 {
+		for _, v := range opapolicy.Evaluate(ctx, sets, s.policyInput(run, env, up.Summary)) {
+			res.Violations = append(res.Violations, v)
+			if v.Level == "hard" {
+				res.Passed = false
+			}
+		}
+	}
 	status := "planned"
 	switch {
 	case !res.Passed:

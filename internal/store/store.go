@@ -652,6 +652,54 @@ func (s *Store) Reap(ctx context.Context, silentFor, planTTL time.Duration) ([]s
 	return ids, rows.Err()
 }
 
+// ---- policy sets ----
+
+type PolicySet struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Scope     string    `json:"scope"`
+	Level     string    `json:"level"`
+	Module    string    `json:"module"`
+	Enabled   bool      `json:"enabled"`
+	CreatedBy string    `json:"created_by"`
+	UpdatedBy string    `json:"updated_by"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+const psCols = `id, name, scope, level, module, enabled, created_by, updated_by, updated_at`
+
+func scanPS(r pgx.Row) (*PolicySet, error) {
+	var p PolicySet
+	err := r.Scan(&p.ID, &p.Name, &p.Scope, &p.Level, &p.Module, &p.Enabled, &p.CreatedBy, &p.UpdatedBy, &p.UpdatedAt)
+	return &p, NotFound(err)
+}
+
+func (s *Store) CreatePolicySet(ctx context.Context, p *PolicySet) (*PolicySet, error) {
+	out, err := scanPS(s.db.QueryRow(ctx, `INSERT INTO policy_sets (name, scope, level, module, enabled, created_by, updated_by)
+		VALUES ($1, $2, $3, $4, $5, $6, $6) RETURNING `+psCols, p.Name, p.Scope, p.Level, p.Module, p.Enabled, p.CreatedBy))
+	if IsUnique(err) {
+		return nil, ErrConflict
+	}
+	return out, err
+}
+
+func (s *Store) UpdatePolicySet(ctx context.Context, p *PolicySet) (*PolicySet, error) {
+	return scanPS(s.db.QueryRow(ctx, `UPDATE policy_sets SET scope = $2, level = $3, module = $4, enabled = $5, updated_by = $6, updated_at = now()
+		WHERE id::text = $1 OR name = $1 RETURNING `+psCols, p.ID, p.Scope, p.Level, p.Module, p.Enabled, p.UpdatedBy))
+}
+
+func (s *Store) GetPolicySet(ctx context.Context, idOrName string) (*PolicySet, error) {
+	return scanPS(s.db.QueryRow(ctx, `SELECT `+psCols+` FROM policy_sets WHERE id::text = $1 OR name = $1`, idOrName))
+}
+
+func (s *Store) ListPolicySets(ctx context.Context) ([]*PolicySet, error) {
+	rows, err := s.db.Query(ctx, `SELECT `+psCols+` FROM policy_sets ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	return Collect(rows, scanPS)
+}
+
 // ---- tenant settings ----
 
 // Setting loads a JSON setting into v; it reports false when unset.

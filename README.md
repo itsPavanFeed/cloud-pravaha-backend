@@ -51,6 +51,17 @@ Cloud Pravaha is a multi-tenant OpenTofu platform that deploys only **pinned pub
   | medium | production environment, in-place changes, network resources, or more than 25 changes | manager + finops |
   | high | deletions or replacements, destroy runs, identity and access changes, or network exposure in production | manager + finops + security |
 
+## Policy sets (OPA/Rego)
+
+Tenant admins and Security can add Rego policy sets (`package pravaha.policy`, rules in `deny`).
+- **Scope:** the whole tenant, one entity or one BU.
+- **Strength:** `hard` (blocks approval) or `advisory`.
+- **Input:** each set sees `input.run` (operation, stack, BU, entity, environment, tier, author), `input.summary` (resource changes with non-sensitive planned values) and `input.cost`.
+- **Safety:** sets compile when saved, run with a 2-second limit, and fail closed.
+- **Dry run:** `POST /policies/test` evaluates a module against a past run.
+
+Starter packs live in `cloud-pravaha-test-resources/policies`.
+
 ## Git integration: contracts repositories
 
 Each tenant can keep its stacks as contracts in a Git branch (GitHub, GitLab, or self-hosted either), one JSON file per stack (`{"name","environment","spec"}`); see `cloud-pravaha-test-resources/contracts-example`. It works like this:
@@ -212,5 +223,4 @@ This build covers the tenancy core of the platform design. Coming next:
 - Resource discovery for backporting (listing a cloud account's resources to suggest imports)
 - LLM integration with RAG
 - SSO
-- OPA policy sets
 - Helm charts

@@ -4,7 +4,7 @@
 #   docker build --build-context web=../cloud-pravaha-web --build-context catalog=../cloud-pravaha-modules/catalog -t cloud-pravaha .
 ARG TOFU_VERSION=1.13.2
 
-FROM golang:1.25-alpine AS build
+FROM golang:1.26-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download && go mod verify

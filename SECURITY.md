@@ -38,6 +38,7 @@ The mapping helps your own audit evidence. It is not a certification: SOC 2, ISO
 | 28 | **Per-tenant cloud trust.** Each tenant plane is its own OIDC issuer, so a cloud trusts only its own tenant's runs, never central | `oidc`, `api` | e2e |
 | 29 | **Least-privilege phases.** Connections can name a read-only identity for plans. Identities are handed to the runner per phase (never written into the generated config), from an allowlist of variables the runner accepts, so a control plane cannot inject OpenTofu options. Run tokens carry `phase:plan` or `phase:apply` for cloud trust policies | `spec.PhaseCredentials`, `runner.buildEnv` | `TestPhaseCredentials` |
 | 30 | **Git as source of truth.** Contracts are fetched outbound with a read-only token sealed with the tenant master key. Git-managed stacks cannot be edited outside Git, removed contracts are never auto-destroyed, and auto-apply is opt-in, limited to low risk and audited as `system:auto-deploy` | `internal/contracts`, `api/contracts.go` | `contracts_test.go`, e2e |
+| 31 | **Tenant policy as code.** Rego policy sets per tenant, entity or BU are compiled on save, evaluated on every plan with a timeout, and fail closed. Writing them needs tenant_admin or security and is audited | `internal/opapolicy`, `api/policies.go` | `opapolicy_test.go`, e2e |
 
 ## Compliance mapping
 
