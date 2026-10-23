@@ -7,9 +7,11 @@
 package oidc
 
 import (
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
@@ -171,10 +173,11 @@ func (i *Issuer) SignJWT(claims map[string]any) (string, error) {
 	return signing + "." + b64(sig), nil
 }
 
-// Verifier checks ES256 JWTs against a set of public keys (a JWKS).
+// Verifier checks ES256 and RS256 JWTs against a set of public keys (a JWKS).
 type Verifier struct {
 	Issuer string
 	keys   map[string]*ecdsa.PublicKey
+	rsa    map[string]*rsa.PublicKey
 }
 
 // NewVerifier parses a JWKS document containing P-256 keys.
@@ -185,8 +188,17 @@ func NewVerifier(issuer string, jwks []byte) (*Verifier, error) {
 	if err := json.Unmarshal(jwks, &doc); err != nil {
 		return nil, fmt.Errorf("parsing JWKS: %w", err)
 	}
-	v := &Verifier{Issuer: strings.TrimRight(issuer, "/"), keys: map[string]*ecdsa.PublicKey{}}
+	v := &Verifier{Issuer: strings.TrimRight(issuer, "/"), keys: map[string]*ecdsa.PublicKey{}, rsa: map[string]*rsa.PublicKey{}}
 	for _, k := range doc.Keys {
+		if k["kty"] == "RSA" && (k["use"] == "" || k["use"] == "sig") {
+			n, err1 := base64.RawURLEncoding.DecodeString(k["n"])
+			e, err2 := base64.RawURLEncoding.DecodeString(k["e"])
+			if err1 != nil || err2 != nil || len(n) < 256 || len(e) == 0 || len(e) > 4 {
+				continue // RSA keys under 2048 bits are ignored
+			}
+			v.rsa[k["kid"]] = &rsa.PublicKey{N: new(big.Int).SetBytes(n), E: int(new(big.Int).SetBytes(e).Int64())}
+			continue
+		}
 		if k["kty"] != "EC" || k["crv"] != "P-256" {
 			continue
 		}
@@ -201,8 +213,8 @@ func NewVerifier(issuer string, jwks []byte) (*Verifier, error) {
 		}
 		v.keys[k["kid"]] = pub
 	}
-	if len(v.keys) == 0 {
-		return nil, errors.New("JWKS contains no usable P-256 keys")
+	if len(v.keys)+len(v.rsa) == 0 {
+		return nil, errors.New("JWKS contains no usable P-256 or RSA keys")
 	}
 	return v, nil
 }
@@ -218,20 +230,33 @@ func (v *Verifier) Verify(tok, audience string, now time.Time) (map[string]any, 
 		return nil, errors.New("malformed header")
 	}
 	var hdr struct{ Alg, Kid string }
-	if json.Unmarshal(hb, &hdr) != nil || hdr.Alg != "ES256" {
-		return nil, errors.New("unsupported token algorithm")
-	}
-	pub := v.keys[hdr.Kid]
-	if pub == nil {
-		return nil, errors.New("unknown signing key")
+	if json.Unmarshal(hb, &hdr) != nil {
+		return nil, errors.New("malformed header")
 	}
 	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
-	if err != nil || len(sig) != 64 {
+	if err != nil {
 		return nil, errors.New("malformed signature")
 	}
 	h := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
-	if !ecdsa.Verify(pub, h[:], new(big.Int).SetBytes(sig[:32]), new(big.Int).SetBytes(sig[32:])) {
-		return nil, errors.New("bad signature")
+	switch hdr.Alg {
+	case "ES256":
+		pub := v.keys[hdr.Kid]
+		if pub == nil {
+			return nil, errors.New("unknown signing key")
+		}
+		if len(sig) != 64 || !ecdsa.Verify(pub, h[:], new(big.Int).SetBytes(sig[:32]), new(big.Int).SetBytes(sig[32:])) {
+			return nil, errors.New("bad signature")
+		}
+	case "RS256":
+		pub := v.rsa[hdr.Kid]
+		if pub == nil {
+			return nil, errors.New("unknown signing key")
+		}
+		if rsa.VerifyPKCS1v15(pub, crypto.SHA256, h[:], sig) != nil {
+			return nil, errors.New("bad signature")
+		}
+	default:
+		return nil, errors.New("unsupported token algorithm")
 	}
 	pb, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
@@ -244,7 +269,7 @@ func (v *Verifier) Verify(tok, audience string, now time.Time) (map[string]any, 
 	if c["iss"] != v.Issuer {
 		return nil, errors.New("wrong issuer")
 	}
-	if c["aud"] != audience {
+	if !audienceMatches(c["aud"], audience) {
 		return nil, errors.New("wrong audience")
 	}
 	exp, _ := c["exp"].(float64)
@@ -257,4 +282,19 @@ func (v *Verifier) Verify(tok, audience string, now time.Time) (map[string]any, 
 		return nil, errors.New("token not yet valid")
 	}
 	return c, nil
+}
+
+// audienceMatches accepts a string aud or an array containing the audience.
+func audienceMatches(aud any, want string) bool {
+	switch a := aud.(type) {
+	case string:
+		return a == want
+	case []any:
+		for _, x := range a {
+			if x == want {
+				return true
+			}
+		}
+	}
+	return false
 }

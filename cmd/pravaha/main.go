@@ -41,6 +41,7 @@ const usage = `pravaha — multi-tenant OpenTofu orchestration with pinned publi
 Usage:
   pravaha central                        run the central plane (frontend, identity, tenant routing)
   pravaha central bootstrap -email E     create a platform admin and print a token (first start)
+  pravaha central scim-token -name N     create a SCIM provisioning token for an identity provider
   pravaha tenant                         run a tenant plane (one client's backend, state and runs)
   pravaha runner                         run an agent that executes OpenTofu for a tenant plane
   pravaha audit verify [-central]        verify a database's audit hash chain
@@ -65,6 +66,8 @@ func main() {
 	case "central":
 		if len(os.Args) > 2 && os.Args[2] == "bootstrap" {
 			err = runBootstrap(ctx, os.Args[3:])
+		} else if len(os.Args) > 2 && os.Args[2] == "scim-token" {
+			err = runSCIMToken(ctx, os.Args[3:])
 		} else {
 			err = runCentral(ctx, log)
 		}
@@ -240,6 +243,42 @@ func runBootstrap(ctx context.Context, args []string) error {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "%s is a platform admin. Token expires %s; it is shown once.\n", u.Email, t.ExpiresAt.Format(time.RFC3339))
+	fmt.Println(plain)
+	return nil
+}
+
+// runSCIMToken creates a bearer token an identity provider uses for SCIM.
+func runSCIMToken(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("central scim-token", flag.ExitOnError)
+	name := fs.String("name", "", "identity provider name, e.g. okta")
+	fs.Parse(args)
+	if *name == "" {
+		return errors.New("usage: pravaha central scim-token -name okta")
+	}
+	db, err := databaseURL()
+	if err != nil {
+		return err
+	}
+	st, err := central.OpenStore(ctx, db)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	if err := st.Migrate(ctx); err != nil {
+		return err
+	}
+	plain, err := secure.NewToken("s")
+	if err != nil {
+		return err
+	}
+	by := "cli:" + currentUser()
+	if err := st.CreateSCIMToken(ctx, *name, by, secure.HashToken(plain)); err != nil {
+		return err
+	}
+	if err := st.AppendAudit(ctx, by, "scim.token_create", "scim/"+*name, "", nil); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "SCIM token for %s (base URL <central>/scim/v2). It is shown once.\n", *name)
 	fmt.Println(plain)
 	return nil
 }

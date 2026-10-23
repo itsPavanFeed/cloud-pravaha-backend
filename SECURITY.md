@@ -40,12 +40,14 @@ The mapping helps your own audit evidence. It is not a certification: SOC 2, ISO
 | 30 | **Git as source of truth.** Contracts are fetched outbound with a read-only token sealed with the tenant master key. Git-managed stacks cannot be edited outside Git, removed contracts are never auto-destroyed, and auto-apply is opt-in, limited to low risk and audited as `system:auto-deploy` | `internal/contracts`, `api/contracts.go` | `contracts_test.go`, e2e |
 | 31 | **Tenant policy as code.** Rego policy sets per tenant, entity or BU are compiled on save, evaluated on every plan with a timeout, and fail closed. Writing them needs tenant_admin or security and is audited | `internal/opapolicy`, `api/policies.go` | `opapolicy_test.go`, e2e |
 | 32 | **Durable lifecycle timers.** With Temporal, every run is a workflow whose timers expire silent, unapproved or hung runs through guarded, idempotent status changes, audited as `system:temporal`. Without it, the database reaper does the same | `internal/orchestrator` | `orchestrator_test.go`, e2e |
+| 33 | **Single sign-on and provisioning.** OIDC authorization code with PKCE, state bound to an HttpOnly SameSite cookie, nonce and verified email checked, RS256/ES256 signatures. Tokens are never put in URLs (single-use 60-second codes). SCIM deactivation revokes every token; group-granted roles are tracked per group | `central/sso.go`, `central/scim.go` | `sso_scim_test.go` (fake IdP), e2e |
 
 ## Compliance mapping
 
 | Framework | Relevant controls |
 | --- | --- |
-| SOC 2 (2017 TSC) CC6.1 logical access | 7, 13, 14, 24, 25, 27 |
+| SOC 2 (2017 TSC) CC6.1 logical access | 7, 13, 14, 24, 25, 27, 33 |
+| SOC 2 CC6.2 / CC6.3 provisioning and removal of access | 33 (SCIM), 13 |
 | SOC 2 CC6.1 / ISO 27001 A.8.3 information access restriction and tenant segregation | 23, 24, 25, 28 |
 | SOC 2 CC6.6 / CC6.7 boundaries and transmission | 9, 21 |
 | SOC 2 CC6.8 unauthorised software | 1, 2, 3, 4, 5 |

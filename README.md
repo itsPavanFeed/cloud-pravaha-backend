@@ -155,6 +155,20 @@ Secrets can be given directly or as `NAME_FILE` pointing to a mounted secret.
 | `PRAVAHA_CLIENT_CERT`, `PRAVAHA_CLIENT_KEY` | Central's mTLS client identity towards tenant planes |
 | `PRAVAHA_WEB_DIR`, `PRAVAHA_LISTEN` | Built web UI; listen address (default `:8443`) |
 
+**SSO and SCIM (central)**
+
+| Variable | Purpose |
+| --- | --- |
+| `PRAVAHA_OIDC_ISSUER`, `PRAVAHA_OIDC_CLIENT_ID` | Enables "Sign in with SSO" (OIDC authorization code + PKCE). Register `<PRAVAHA_PUBLIC_URL>/auth/callback` as the redirect URI |
+| `PRAVAHA_OIDC_CLIENT_SECRET` | For confidential clients (`_FILE` supported); public clients rely on PKCE |
+| `PRAVAHA_OIDC_ALLOWED_DOMAINS` | Optional comma-separated email domains |
+| `PRAVAHA_OIDC_TRUST_UNVERIFIED_EMAIL=1` | For IdPs that omit `email_verified` (for example Entra ID) |
+| `PRAVAHA_OIDC_LABEL` | Button text |
+
+SSO only authenticates: users must already exist (added by a tenant admin, or provisioned by SCIM). Sessions last 12 hours and are revoked on sign-out.
+
+SCIM 2.0 lives at `<central>/scim/v2`; create its bearer token with `pravaha central scim-token -name okta`. Users are provisioned, and deactivating one revokes all their tokens. Groups named `pravaha:<tenant>:<role>`, `pravaha:<tenant>:entity:<slug>:<role>` or `pravaha:<tenant>:bu:<slug>:<role>` grant that role to their members, and removing a member removes only that grant.
+
 **Tenant plane**
 
 | Variable | Purpose |
@@ -224,5 +238,4 @@ This build covers the tenancy core of the platform design. Coming next:
 - Pull-request plans: speculative plans posted back to Git pull requests
 - Resource discovery for backporting (listing a cloud account's resources to suggest imports)
 - LLM integration with RAG
-- SSO
 - Helm charts

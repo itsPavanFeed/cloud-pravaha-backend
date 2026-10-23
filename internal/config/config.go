@@ -54,6 +54,15 @@ type Central struct {
 	WebDir       string
 	ClientCert   string // mTLS client certificate presented to tenant planes
 	ClientKey    string
+
+	// SSO (OpenID Connect). Empty issuer disables SSO.
+	OIDCIssuer          string
+	OIDCClientID        string
+	OIDCClientSecret    string   // optional: public clients rely on PKCE alone
+	OIDCRedirectURL     string   // default <PublicURL>/auth/callback
+	OIDCAllowedDomains  []string // optional email domain allowlist
+	OIDCTrustUnverified bool     // accept tokens without email_verified=true (some IdPs omit it)
+	OIDCLabel           string   // button text, e.g. "Sign in with Okta"
 }
 
 type Runner struct {
@@ -128,6 +137,18 @@ func LoadCentral() (*Central, error) {
 		WebDir:       os.Getenv("PRAVAHA_WEB_DIR"),
 		ClientCert:   os.Getenv("PRAVAHA_CLIENT_CERT"),
 		ClientKey:    os.Getenv("PRAVAHA_CLIENT_KEY"),
+
+		OIDCIssuer:          strings.TrimRight(os.Getenv("PRAVAHA_OIDC_ISSUER"), "/"),
+		OIDCClientID:        os.Getenv("PRAVAHA_OIDC_CLIENT_ID"),
+		OIDCClientSecret:    secret("PRAVAHA_OIDC_CLIENT_SECRET"),
+		OIDCRedirectURL:     os.Getenv("PRAVAHA_OIDC_REDIRECT_URL"),
+		OIDCTrustUnverified: os.Getenv("PRAVAHA_OIDC_TRUST_UNVERIFIED_EMAIL") == "1",
+		OIDCLabel:           env("PRAVAHA_OIDC_LABEL", "Sign in with SSO"),
+	}
+	for _, d := range strings.Split(os.Getenv("PRAVAHA_OIDC_ALLOWED_DOMAINS"), ",") {
+		if d = strings.ToLower(strings.TrimSpace(d)); d != "" {
+			c.OIDCAllowedDomains = append(c.OIDCAllowedDomains, d)
+		}
 	}
 	errs := common(c.DatabaseURL, c.MasterKey, c.PublicURL, c.InsecureHTTP)
 	if c.InsecureHTTP {
@@ -140,6 +161,17 @@ func LoadCentral() (*Central, error) {
 	}
 	if c.ClientCert == "" || c.ClientKey == "" {
 		errs = append(errs, errors.New("PRAVAHA_CLIENT_CERT and PRAVAHA_CLIENT_KEY are required: central calls tenant planes over mTLS"))
+	}
+	if c.OIDCIssuer != "" {
+		if u, err := url.Parse(c.OIDCIssuer); err != nil || u.Host == "" || (u.Scheme != "https" && !(u.Scheme == "http" && loopbackHost(u.Hostname()))) {
+			errs = append(errs, errors.New("PRAVAHA_OIDC_ISSUER must be an https URL"))
+		}
+		if c.OIDCClientID == "" {
+			errs = append(errs, errors.New("PRAVAHA_OIDC_CLIENT_ID is required with PRAVAHA_OIDC_ISSUER"))
+		}
+		if c.OIDCRedirectURL == "" {
+			c.OIDCRedirectURL = c.PublicURL + "/auth/callback"
+		}
 	}
 	return c, errors.Join(errs...)
 }

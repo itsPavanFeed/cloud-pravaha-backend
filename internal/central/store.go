@@ -3,7 +3,9 @@ package central
 import (
 	"context"
 	"embed"
+	"fmt"
 	"io/fs"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -373,4 +375,150 @@ func (s *Store) OnlyInTenant(ctx context.Context, userID, tenantID string) (bool
 	var other bool
 	err := s.Pool().QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM memberships WHERE user_id = $1 AND tenant_id <> $2)`, userID, tenantID).Scan(&other)
 	return !other, err
+}
+
+// ---- SSO ----
+
+func (s *Store) CreateAuthFlow(ctx context.Context, state, verifier, nonce string) error {
+	_, err := s.Pool().Exec(ctx, `INSERT INTO auth_flows (state, verifier, nonce) VALUES ($1, $2, $3)`, state, verifier, nonce)
+	s.Pool().Exec(ctx, `DELETE FROM auth_flows WHERE created_at < now() - interval '1 hour'`)
+	return err
+}
+
+// TakeAuthFlow consumes a login flow (single use) if it is younger than ttl.
+func (s *Store) TakeAuthFlow(ctx context.Context, state string, ttl time.Duration) (verifier, nonce string, err error) {
+	err = s.Pool().QueryRow(ctx, `DELETE FROM auth_flows WHERE state = $1 AND created_at > now() - $2::interval RETURNING verifier, nonce`,
+		state, fmt.Sprintf("%d seconds", int(ttl.Seconds()))).Scan(&verifier, &nonce)
+	return verifier, nonce, store.NotFound(err)
+}
+
+func (s *Store) CreateAuthCode(ctx context.Context, hash []byte, userID string, ttl time.Duration) error {
+	_, err := s.Pool().Exec(ctx, `INSERT INTO auth_codes (code_hash, user_id, expires_at) VALUES ($1, $2, now() + $3::interval)`,
+		hash, userID, fmt.Sprintf("%d seconds", int(ttl.Seconds())))
+	s.Pool().Exec(ctx, `DELETE FROM auth_codes WHERE expires_at < now()`)
+	return err
+}
+
+// TakeAuthCode consumes a one-time sign-in code and returns its (enabled) user.
+func (s *Store) TakeAuthCode(ctx context.Context, hash []byte) (*User, error) {
+	return scanUser(s.Pool().QueryRow(ctx, `WITH c AS (DELETE FROM auth_codes WHERE code_hash = $1 AND expires_at > now() RETURNING user_id)
+		SELECT `+userCols+` FROM users WHERE id = (SELECT user_id FROM c) AND disabled_at IS NULL`, hash))
+}
+
+func (s *Store) RevokeTokenByHash(ctx context.Context, hash []byte) error {
+	tag, err := s.Pool().Exec(ctx, `UPDATE api_tokens SET revoked_at = now() WHERE token_hash = $1 AND revoked_at IS NULL`, hash)
+	if err == nil && tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return err
+}
+
+// ---- SCIM ----
+
+func (s *Store) CreateSCIMToken(ctx context.Context, name, by string, hash []byte) error {
+	_, err := s.Pool().Exec(ctx, `INSERT INTO scim_tokens (name, token_hash, created_by) VALUES ($1, $2, $3)`, name, hash, by)
+	return err
+}
+
+func (s *Store) SCIMTokenValid(ctx context.Context, hash []byte) bool {
+	var ok bool
+	s.Pool().QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM scim_tokens WHERE token_hash = $1 AND revoked_at IS NULL)`, hash).Scan(&ok)
+	return ok
+}
+
+func (s *Store) UserByID(ctx context.Context, id string) (*User, error) {
+	return scanUser(s.Pool().QueryRow(ctx, `SELECT `+userCols+` FROM users WHERE id::text = $1`, id))
+}
+
+func (s *Store) ListUsers(ctx context.Context, limit int) ([]*User, error) {
+	rows, err := s.Pool().Query(ctx, `SELECT `+userCols+` FROM users ORDER BY email LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	return store.Collect(rows, scanUser)
+}
+
+func (s *Store) SetUserName(ctx context.Context, id, name string) error {
+	_, err := s.Pool().Exec(ctx, `UPDATE users SET name = $2 WHERE id = $1`, id, name)
+	return err
+}
+
+// SetUserActive enables or disables a user; disabling revokes all their tokens.
+func (s *Store) SetUserActive(ctx context.Context, id string, active bool) error {
+	if active {
+		_, err := s.Pool().Exec(ctx, `UPDATE users SET disabled_at = NULL WHERE id = $1`, id)
+		return err
+	}
+	if _, err := s.Pool().Exec(ctx, `UPDATE users SET disabled_at = COALESCE(disabled_at, now()) WHERE id = $1`, id); err != nil {
+		return err
+	}
+	_, err := s.Pool().Exec(ctx, `UPDATE api_tokens SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL`, id)
+	return err
+}
+
+type SCIMGroup struct {
+	ID          string
+	DisplayName string
+}
+
+func (s *Store) CreateSCIMGroup(ctx context.Context, name, externalID string) (*SCIMGroup, error) {
+	g := &SCIMGroup{DisplayName: name}
+	err := s.Pool().QueryRow(ctx, `INSERT INTO scim_groups (display_name, external_id) VALUES ($1, $2) RETURNING id`, name, externalID).Scan(&g.ID)
+	return g, err
+}
+
+func (s *Store) SCIMGroupByID(ctx context.Context, id string) (*SCIMGroup, error) {
+	g := &SCIMGroup{}
+	err := s.Pool().QueryRow(ctx, `SELECT id, display_name FROM scim_groups WHERE id::text = $1`, id).Scan(&g.ID, &g.DisplayName)
+	return g, store.NotFound(err)
+}
+
+func (s *Store) SCIMGroupByName(ctx context.Context, name string) (*SCIMGroup, error) {
+	g := &SCIMGroup{}
+	err := s.Pool().QueryRow(ctx, `SELECT id, display_name FROM scim_groups WHERE display_name = $1`, name).Scan(&g.ID, &g.DisplayName)
+	return g, store.NotFound(err)
+}
+
+func (s *Store) SCIMGroups(ctx context.Context) []*SCIMGroup {
+	rows, err := s.Pool().Query(ctx, `SELECT id, display_name FROM scim_groups ORDER BY display_name`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []*SCIMGroup
+	for rows.Next() {
+		g := &SCIMGroup{}
+		rows.Scan(&g.ID, &g.DisplayName)
+		out = append(out, g)
+	}
+	return out
+}
+
+func (s *Store) DeleteSCIMGroup(ctx context.Context, id string) {
+	s.Pool().Exec(ctx, `DELETE FROM scim_groups WHERE id = $1`, id)
+}
+
+// SCIMGroupMembers lists users holding a membership granted by the group.
+func (s *Store) SCIMGroupMembers(ctx context.Context, groupID string) []*User {
+	rows, err := s.Pool().Query(ctx, `SELECT DISTINCT `+prefixCols("u.", userCols)+` FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.created_by = $1`, "scim:"+groupID)
+	if err != nil {
+		return nil
+	}
+	us, _ := store.Collect(rows, scanUser)
+	return us
+}
+
+// RemoveMembershipBy removes one membership created by a given source.
+func (s *Store) RemoveMembershipBy(ctx context.Context, userID, tenantID string, entityID, buID *string, role, by string) bool {
+	tag, err := s.Pool().Exec(ctx, `DELETE FROM memberships WHERE user_id = $1 AND tenant_id = $2 AND entity_id IS NOT DISTINCT FROM $3
+		AND bu_id IS NOT DISTINCT FROM $4 AND role = $5 AND created_by = $6`, userID, tenantID, entityID, buID, role, by)
+	return err == nil && tag.RowsAffected() > 0
+}
+
+func prefixCols(prefix, cols string) string {
+	parts := strings.Split(cols, ", ")
+	for i := range parts {
+		parts[i] = prefix + parts[i]
+	}
+	return strings.Join(parts, ", ")
 }

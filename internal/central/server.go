@@ -51,6 +51,7 @@ type Server struct {
 
 	mu         sync.Mutex
 	transports map[string]*tenantTransport
+	sso        oidcProvider
 }
 
 type tenantTransport struct {
@@ -78,7 +79,27 @@ func (s *Server) Handler() http.Handler {
 		w.Write(s.issuer.JWKS())
 	})
 
+	// SSO (OIDC) and SCIM provisioning.
+	mux.HandleFunc("GET /api/v1/auth/config", s.authConfig)
+	mux.HandleFunc("GET /auth/login", s.ssoLogin)
+	mux.HandleFunc("GET /auth/callback", s.ssoCallback)
+	mux.HandleFunc("POST /api/v1/auth/exchange", s.authExchange)
+	sc := s.scimAuth
+	mux.Handle("GET /scim/v2/ServiceProviderConfig", sc(s.scimConfig))
+	mux.Handle("GET /scim/v2/Users", sc(s.scimListUsers))
+	mux.Handle("POST /scim/v2/Users", sc(s.scimCreateUser))
+	mux.Handle("GET /scim/v2/Users/{id}", sc(s.scimGetUser))
+	mux.Handle("PUT /scim/v2/Users/{id}", sc(s.scimUpdateUser))
+	mux.Handle("PATCH /scim/v2/Users/{id}", sc(s.scimUpdateUser))
+	mux.Handle("DELETE /scim/v2/Users/{id}", sc(s.scimDeleteUser))
+	mux.Handle("GET /scim/v2/Groups", sc(s.scimListGroups))
+	mux.Handle("POST /scim/v2/Groups", sc(s.scimCreateGroup))
+	mux.Handle("GET /scim/v2/Groups/{id}", sc(s.scimGetGroup))
+	mux.Handle("PATCH /scim/v2/Groups/{id}", sc(s.scimPatchGroup))
+	mux.Handle("DELETE /scim/v2/Groups/{id}", sc(s.scimDeleteGroup))
+
 	a := s.auth
+	mux.Handle("POST /api/v1/auth/logout", a(s.logout))
 	mux.Handle("GET /api/v1/me", a(s.me))
 	mux.Handle("GET /api/v1/me/tokens", a(s.listOwnTokens))
 	mux.Handle("POST /api/v1/me/tokens", a(s.createOwnToken))
