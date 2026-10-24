@@ -1214,14 +1214,15 @@ func (s *Store) ListNotifications(ctx context.Context, bus []string, before int6
 	return Collect(rows, scanNotif)
 }
 
-// UnreadNotifications counts visible notifications after the person's watermark.
-func (s *Store) UnreadNotifications(ctx context.Context, subject string, bus []string) (int, int64, error) {
-	args := []any{subject}
-	var n int
-	var last int64
-	err := s.db.QueryRow(ctx, `SELECT count(*) FILTER (WHERE id > COALESCE((SELECT last_id FROM notification_reads WHERE subject = $1), 0)),
-		COALESCE(max(id), 0) FROM notifications WHERE `+visibleNotif(bus, &args), args...).Scan(&n, &last)
-	return n, last, err
+// UnreadNotifications counts visible notifications after the person's
+// watermark, and returns the newest visible id and the watermark itself.
+func (s *Store) UnreadNotifications(ctx context.Context, subject string, bus []string) (n int, last, read int64, err error) {
+	if err = s.db.QueryRow(ctx, `SELECT COALESCE((SELECT last_id FROM notification_reads WHERE subject = $1), 0)`, subject).Scan(&read); err != nil {
+		return
+	}
+	args := []any{read}
+	err = s.db.QueryRow(ctx, `SELECT count(*) FILTER (WHERE id > $1), COALESCE(max(id), 0) FROM notifications WHERE `+visibleNotif(bus, &args), args...).Scan(&n, &last)
+	return
 }
 
 func (s *Store) MarkNotificationsRead(ctx context.Context, subject string, upTo int64) error {

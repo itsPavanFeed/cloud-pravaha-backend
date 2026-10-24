@@ -168,12 +168,12 @@ func (s *Server) listNotifications(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) unreadNotifications(w http.ResponseWriter, r *http.Request) {
-	n, last, err := s.store.UnreadNotifications(r.Context(), user(r).Subject, visible(r))
+	n, last, read, err := s.store.UnreadNotifications(r.Context(), user(r).Subject, visible(r))
 	if err != nil {
 		s.writeStoreErr(w, err, "")
 		return
 	}
-	writeJSON(w, 200, map[string]any{"unread": n, "latest_id": last})
+	writeJSON(w, 200, map[string]any{"unread": n, "latest_id": last, "read_upto": read})
 }
 
 func (s *Server) readNotifications(w http.ResponseWriter, r *http.Request) {

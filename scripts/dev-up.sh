@@ -34,6 +34,30 @@ if ! docker ps --format '{{.Names}}' | grep -qx "$PG_NAME"; then
 fi
 until docker exec "$PG_NAME" pg_isready -U postgres >/dev/null 2>&1; do sleep 1; done
 sleep 1
+
+# Temporal orchestrates each run's lifecycle (UI on http://localhost:8233).
+# DEV_TEMPORAL=0 uses the built-in database scheduler instead.
+TEMPORAL_NAME=pravaha-dev-temporal
+if [[ "${DEV_TEMPORAL:-1}" != 0 ]]; then
+  if ! docker ps --format '{{.Names}}' | grep -qx "$TEMPORAL_NAME"; then
+    docker rm -f "$TEMPORAL_NAME" >/dev/null 2>&1 || true
+    # in-memory dev server: workflow history resets when the container restarts;
+    # the database stays the source of truth for runs
+    docker run -d --name "$TEMPORAL_NAME" -p 127.0.0.1:7233:7233 -p 127.0.0.1:8233:8233 \
+      temporalio/temporal:latest server start-dev --ip 0.0.0.0 >/dev/null
+  fi
+  ready=""
+  for _ in $(seq 1 60); do
+    docker exec "$TEMPORAL_NAME" temporal operator namespace describe -n default >/dev/null 2>&1 && { ready=1; break; }
+    docker ps --format '{{.Names}}' | grep -qx "$TEMPORAL_NAME" || break # exited
+    sleep 1
+  done
+  if [[ -n "$ready" ]]; then
+    export PRAVAHA_TEMPORAL_ADDRESS=127.0.0.1:7233
+  else
+    echo "Temporal did not start (docker logs $TEMPORAL_NAME); using the built-in scheduler" >&2
+  fi
+fi
 FRESH=""
 for db in central acme; do
   if ! docker exec "$PG_NAME" psql -U postgres -Atc "SELECT 1 FROM pg_database WHERE datname='$db'" | grep -q 1; then
@@ -108,7 +132,7 @@ if [[ -n "$FRESH" || ! -f "$DEV/tokens.env" ]]; then
   call "$TINA" POST /api/v1/tenants/acme/bus '{"slug":"data","name":"Data platform","entity":"platform"}' >/dev/null
   # email:role:scope-kind:scope (scope-kind is bu, entity, or empty for tenant-wide)
   for m in alice@acme.local:developer:bu:payments mike@acme.local:manager:bu:payments rita@acme.local:manager:entity:retail \
-           eve@acme.local:developer:bu:data fiona@acme.local:finops:: sam@acme.local:security:: ava@acme.local:auditor::; do
+           paul@acme.local:manager:entity:platform eve@acme.local:developer:bu:data fiona@acme.local:finops:: sam@acme.local:security:: ava@acme.local:auditor::; do
     IFS=: read -r email role kind scope <<<"$m"
     body="{\"email\":\"$email\",\"role\":\"$role\"${kind:+,\"$kind\":\"$scope\"}}"
     call "$TINA" POST /api/v1/tenants/acme/members "$body" >/dev/null
@@ -123,9 +147,25 @@ if [[ -n "$FRESH" || ! -f "$DEV/tokens.env" ]]; then
     echo "ROOT=$ROOT_TOKEN       # platform admin (onboarding only)"
     echo "TINA=$TINA       # acme tenant_admin"
     echo "ALICE=$ALICE       # developer, payments"
-    for u in mike rita eve fiona sam ava; do echo "$(echo $u | tr a-z A-Z)=$(tok "$TINA" $u@acme.local)"; done
+    for u in mike rita paul eve fiona sam ava; do echo "$(echo $u | tr a-z A-Z)=$(tok "$TINA" $u@acme.local)"; done
     echo "RUNNER_TOKEN=$RUNNER_TOKEN"
   } >"$DEV/tokens.env"
+fi
+# Older seeds had no manager for the Platform product (BU Data): add one.
+if ! grep -q '^PAUL=' "$DEV/tokens.env"; then
+  # the platform admin can always do this (a tenant admin's token may have been signed out)
+  TINA=$(sed -n 's/^ROOT=\([^ ]*\).*/\1/p' "$DEV/tokens.env")
+  curl -sS -o "$DEV/paul.log" -H "Authorization: Bearer $TINA" -H 'Content-Type: application/json' -X POST "$CENTRAL/api/v1/tenants/acme/members" \
+    --data-binary '{"email":"paul@acme.local","role":"manager","entity":"platform"}' || true
+  PAUL=$(curl -sS -H "Authorization: Bearer $TINA" -H 'Content-Type: application/json' -X POST "$CENTRAL/api/v1/tenants/acme/tokens" \
+    --data-binary '{"email":"paul@acme.local","name":"dev","ttl_days":30}' | python3 -c 'import sys,json
+try: print(json.load(sys.stdin).get("secret",""))
+except Exception: print("")' || true)
+  if [[ -n "$PAUL" ]]; then
+    (umask 077; echo "PAUL=$PAUL       # manager, entity platform (BU data)" >>"$DEV/tokens.env")
+  else
+    echo "could not add PAUL (see $DEV/paul.log)" >&2
+  fi
 fi
 RUNNER_TOKEN=$(grep '^RUNNER_TOKEN=' "$DEV/tokens.env" | cut -d= -f2)
 
@@ -145,10 +185,12 @@ cat <<EOT
   Sign in with a token from $DEV/tokens.env:
     Tenant acme > entities Retail (BUs Payments, Checkout) and Platform (BU Data)
     ALICE  developer, BU Payments: plans stacks      MIKE   manager, BU Payments: signs the manager step
-    RITA   manager, entity Retail (all its BUs)      FIONA  finops (tenant): signs finops
+    RITA   manager, entity Retail (all its BUs)      PAUL   manager, entity Platform (BU Data)
+    FIONA  finops (tenant): signs finops
     SAM    security (tenant): signs security         EVE    developer, BU Data: cannot see Retail
     AVA    auditor   TINA tenant admin   ROOT platform admin
-  Logs in $DEV/*.log.  Ctrl-C to stop (PostgreSQL keeps running: docker rm -f $PG_NAME).
+  Temporal: ${PRAVAHA_TEMPORAL_ADDRESS:-off (built-in scheduler)}${PRAVAHA_TEMPORAL_ADDRESS:+ · UI http://localhost:8233}
+  Logs in $DEV/*.log.  Ctrl-C to stop (PostgreSQL and Temporal keep running: docker rm -f $PG_NAME $TEMPORAL_NAME).
 
 EOT
 wait "${PIDS[0]}"
