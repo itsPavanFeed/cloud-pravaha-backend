@@ -1195,7 +1195,7 @@ func (s *Store) AddNotification(ctx context.Context, n *Notification) (*Notifica
 }
 
 // visibleNotif filters to the given business units (nil = all); tenant-wide
-// notifications (bu = '') are visible to everyone in the tenant.
+// notifications (bu = ”) are visible to everyone in the tenant.
 func visibleNotif(bus []string, args *[]any) string {
 	if bus == nil {
 		return "true"
