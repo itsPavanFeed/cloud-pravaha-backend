@@ -266,3 +266,36 @@ func TestInputIntoEnforcedObject(t *testing.T) {
 		t.Fatalf("want override error, got %v", err)
 	}
 }
+
+func TestOrganisationLabels(t *testing.T) {
+	l := Labels(GenerateInput{Tenant: "acme", Entity: "Retail Co", BU: "payments", Environment: "payments-prod", StackName: "api"})
+	want := map[string]string{"managed-by": "cloud-pravaha", "pravaha-tenant": "acme", "pravaha-entity": "retail-co", "pravaha-bu": "payments", "pravaha-environment": "payments-prod", "pravaha-stack": "api"}
+	for k, v := range want {
+		if l[k] != v {
+			t.Fatalf("%s = %q, want %q (all: %v)", k, l[k], v, l)
+		}
+	}
+	c, err := catalog.New([]*catalog.Module{
+		{ID: "azure-thing", Source: "Azure/thing/azurerm", Versions: []string{"1.0.0"}, Cloud: "azure", Providers: []string{"Azure/azapi"},
+			Inputs: []*catalog.Input{{Name: "name", Type: "string"}, {Name: "tags", Type: "map(string)"}}},
+	}, []catalog.Provider{{Source: "Azure/azapi", Version: "2.13.0", Cloud: "azure"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := mustDecode(t, `{"modules":[{"name":"x","module":"azure-thing","inputs":{"name":"n","tags":{"team":"pay","pravaha-bu":"spoofed"}}}]}`)
+	gen, err := st.Generate(c, GenerateInput{StackName: "api", Environment: "payments-prod", Tenant: "acme", Entity: "retail", BU: "payments",
+		Cloud: &Cloud{Provider: "azure", Auth: "oidc", Azure: &AzureCloud{TenantID: "00000000-0000-0000-0000-000000000001", SubscriptionID: "00000000-0000-0000-0000-000000000002", ClientID: "00000000-0000-0000-0000-000000000003"}}, TofuVersion: "1.13.2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg struct {
+		Module map[string]struct {
+			Tags map[string]string `json:"tags"`
+		} `json:"module"`
+	}
+	json.Unmarshal(gen.Files["main.tf.json"], &cfg)
+	tags := cfg.Module["x"].Tags
+	if tags["team"] != "pay" || tags["pravaha-bu"] != "payments" || tags["pravaha-entity"] != "retail" {
+		t.Fatalf("azure tags = %v (user tags kept, platform labels win)", tags)
+	}
+}

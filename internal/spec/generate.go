@@ -23,8 +23,10 @@ const (
 type GenerateInput struct {
 	StackName   string
 	Environment string
-	Cloud       *Cloud
-	TofuVersion string // exact engine version runs must use
+	// Where the stack sits in the organisation; used for resource labels.
+	Tenant, Entity, BU string
+	Cloud              *Cloud
+	TofuVersion        string // exact engine version runs must use
 }
 
 // Generated is a complete, deterministic working directory for one stack.
@@ -73,6 +75,9 @@ func (s *Stack) Generate(cat *catalog.Catalog, in GenerateInput) (*Generated, er
 				continue
 			}
 			block[k] = val
+		}
+		if in.Cloud.Provider == "azure" {
+			mergeTags(block, cm, Labels(in))
 		}
 		modules[m.Name] = block
 		sources = append(sources, cm.Source)
@@ -163,6 +168,36 @@ func (s *Stack) Generate(cat *catalog.Catalog, in GenerateInput) (*Generated, er
 // providerConfig builds provider blocks that authenticate only through workload
 // identity. Static credentials cannot be expressed: the Cloud type has no field
 // for them and no user input reaches a provider block.
+// Labels are put on every resource a stack creates: AWS default_tags, GCP
+// default_labels, and the tags input of Azure modules. Values follow the
+// strictest rules (GCP: lowercase letters, digits, - and _, at most 63).
+func Labels(in GenerateInput) map[string]string {
+	l := map[string]string{"managed-by": "cloud-pravaha"}
+	for k, v := range map[string]string{"pravaha-tenant": in.Tenant, "pravaha-entity": in.Entity, "pravaha-bu": in.BU,
+		"pravaha-environment": in.Environment, "pravaha-stack": in.StackName} {
+		if v = labelValue(v); v != "" {
+			l[k] = v
+		}
+	}
+	return l
+}
+
+func labelValue(v string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(v) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+		if b.Len() == 63 {
+			break
+		}
+	}
+	return b.String()
+}
+
 func providerConfig(in GenerateInput, used map[string]catalog.Provider, files map[string][]byte) (map[string]any, error) {
 	c := in.Cloud
 	out := map[string]any{}
@@ -171,11 +206,7 @@ func providerConfig(in GenerateInput, used map[string]catalog.Provider, files ma
 	if len(session) > 64 {
 		session = session[:64]
 	}
-	tags := map[string]string{
-		"managed-by":          "cloud-pravaha",
-		"pravaha-stack":       in.StackName,
-		"pravaha-environment": in.Environment,
-	}
+	tags := Labels(in)
 
 	switch c.Provider {
 	case "aws":
@@ -203,7 +234,7 @@ func providerConfig(in GenerateInput, used map[string]catalog.Provider, files ma
 		p := map[string]any{
 			"project":                         c.GCP.ProjectID,
 			"region":                          c.GCP.Region,
-			"default_labels":                  map[string]string{"managed-by": "cloud-pravaha", "pravaha-stack": in.StackName},
+			"default_labels":                  tags,
 			"add_terraform_attribution_label": true,
 		}
 		if c.Auth == "oidc" {
@@ -252,4 +283,28 @@ func providerConfig(in GenerateInput, used map[string]catalog.Provider, files ma
 		out["modtm"] = map[string]any{"enabled": false}
 	}
 	return out, nil
+}
+
+// mergeTags adds the platform labels to an Azure module's tags input (Azure has
+// no provider-level default tags). Platform labels win over user tags.
+func mergeTags(block map[string]any, cm *catalog.Module, labels map[string]string) {
+	in := cm.Input("tags")
+	if in == nil || in.Type != "map(string)" {
+		return
+	}
+	tags := map[string]any{}
+	switch v := block["tags"].(type) {
+	case json.RawMessage:
+		if json.Unmarshal(v, &tags) != nil {
+			return
+		}
+	case string: // a module output reference
+		lb, _ := json.Marshal(labels)
+		block["tags"] = "${merge(" + strings.TrimSuffix(strings.TrimPrefix(v, "${"), "}") + ", " + string(lb) + ")}"
+		return
+	}
+	for k, v := range labels {
+		tags[k] = v
+	}
+	block["tags"] = tags
 }

@@ -3,6 +3,7 @@ package central
 import (
 	"context"
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
 	"strings"
@@ -182,9 +183,12 @@ func scanEntity(r pgx.Row) (*Entity, error) {
 }
 
 func (s *Store) CreateEntity(ctx context.Context, tenantID, slug, name, by string) (*Entity, error) {
-	e, err := scanEntity(s.Pool().QueryRow(ctx, `INSERT INTO entities (tenant_id, slug, name, created_by) VALUES ($1, $2, $3, $4)
+	// An entity (product) never shares a slug with a business unit, so labels and
+	// contract folders are unambiguous.
+	e, err := scanEntity(s.Pool().QueryRow(ctx, `INSERT INTO entities (tenant_id, slug, name, created_by)
+		SELECT $1, $2, $3, $4 WHERE NOT EXISTS (SELECT 1 FROM business_units WHERE tenant_id = $1 AND slug = $2)
 		RETURNING id, slug, name, created_by, created_at`, tenantID, slug, name, by))
-	if store.IsUnique(err) {
+	if store.IsUnique(err) || errors.Is(err, store.ErrNotFound) {
 		return nil, ErrConflict
 	}
 	return e, err
@@ -223,9 +227,10 @@ func scanBU(r pgx.Row) (*BU, error) {
 
 func (s *Store) CreateBU(ctx context.Context, tenantID, entityID, slug, name, by string) (*BU, error) {
 	var id string
-	err := s.Pool().QueryRow(ctx, `INSERT INTO business_units (tenant_id, entity_id, slug, name, created_by) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+	err := s.Pool().QueryRow(ctx, `INSERT INTO business_units (tenant_id, entity_id, slug, name, created_by)
+		SELECT $1, $2, $3, $4, $5 WHERE NOT EXISTS (SELECT 1 FROM entities WHERE tenant_id = $1 AND slug = $3) RETURNING id`,
 		tenantID, entityID, slug, name, by).Scan(&id)
-	if store.IsUnique(err) {
+	if store.IsUnique(err) || errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrConflict
 	}
 	if err != nil {

@@ -123,3 +123,24 @@ func keys(m map[string][]byte) string {
 	}
 	return strings.Join(ks, ",")
 }
+
+func TestNestedLayout(t *testing.T) {
+	files := map[string][]byte{
+		"stacks/retail/payments/payments-prod/api.json": []byte(`{"name":"api","spec":{"modules":[]}}`),
+		"stacks/retail/payments/payments-dev/web.json":  []byte(`{"name":"web","environment":"payments-dev","spec":{"modules":[]}}`),
+		"stacks/retail/payments/payments-dev/bad.json":  []byte(`{"name":"bad","environment":"payments-prod","spec":{"modules":[]}}`),
+		"stacks/retail/payments/shallow.json":           []byte(`{"name":"shallow","spec":{"modules":[]}}`),
+		"stacks/loose.json":                             []byte(`{"name":"loose","environment":"x","spec":{"modules":[]}}`),
+		"docs/readme.json":                              []byte(`{}`),
+	}
+	cs, probs := ParseLayout(files, "stacks", "nested")
+	if len(cs) != 2 || cs[1].Name != "api" || cs[1].Environment != "payments-prod" || cs[1].BU != "payments" || cs[1].Entity != "retail" || cs[0].Environment != "payments-dev" {
+		t.Fatalf("contracts = %+v", cs)
+	}
+	if len(probs) != 3 || probs["stacks/loose.json"] == "" || probs["stacks/retail/payments/payments-dev/bad.json"] == "" {
+		t.Fatalf("problems = %v", probs)
+	}
+	if err := (&Config{Provider: "github", Repo: "a/b", Branch: "main", Path: "stacks", PollSeconds: 60, Layout: "deep"}).Validate(false); err == nil {
+		t.Fatal("unknown layout accepted")
+	}
+}

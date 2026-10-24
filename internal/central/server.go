@@ -584,7 +584,7 @@ func (s *Server) createEntity(w http.ResponseWriter, r *http.Request) {
 	}
 	e, err := s.store.CreateEntity(r.Context(), t.ID, b.Slug, b.Name, current(r).Email)
 	if err != nil {
-		s.storeErr(w, err, "an entity with that slug exists")
+		s.storeErr(w, err, "that slug is already used by an entity or a business unit in this tenant")
 		return
 	}
 	s.audit(r.Context(), current(r).Email, "entity.create", "entity/"+e.Slug, t.Slug, e)
@@ -625,7 +625,7 @@ func (s *Server) createBU(w http.ResponseWriter, r *http.Request) {
 	}
 	bu, err := s.store.CreateBU(r.Context(), t.ID, e.ID, b.Slug, b.Name, current(r).Email)
 	if err != nil {
-		s.storeErr(w, err, "a business unit with that slug exists")
+		s.storeErr(w, err, "that slug is already used by a business unit or an entity in this tenant")
 		return
 	}
 	s.audit(r.Context(), current(r).Email, "bu.create", "bu/"+bu.Slug, t.Slug, bu)

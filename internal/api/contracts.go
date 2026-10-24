@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -200,7 +201,7 @@ func (s *Server) syncContracts(ctx context.Context, force bool) (*SyncStatus, er
 		return fail(err)
 	}
 	actor := "git:" + cfg.Repo + "@" + rev[:7]
-	cs, problems := contracts.Parse(files, cfg.Path)
+	cs, problems := contracts.ParseLayout(files, cfg.Path, cfg.Layout)
 	st := SyncStatus{Revision: rev, SyncedAt: time.Now(), Results: []SyncResult{}}
 	for f, msg := range problems {
 		st.Results = append(st.Results, SyncResult{File: f, Action: "error", Error: msg})
@@ -233,6 +234,9 @@ func (s *Server) applyContract(ctx context.Context, cfg *contracts.Config, c con
 	env, err := s.store.GetEnvironment(ctx, c.Environment)
 	if err != nil {
 		return errOut("unknown environment " + c.Environment)
+	}
+	if c.BU != "" && (env.BU != c.BU || env.Entity != c.Entity) {
+		return errOut(fmt.Sprintf("environment %s belongs to %s/%s, not folder %s/%s", env.Name, env.Entity, env.BU, c.Entity, c.BU))
 	}
 	gen, _, probs := s.build(ctx, c.Name, env, c.Spec)
 	if probs != nil {

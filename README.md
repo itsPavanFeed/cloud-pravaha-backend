@@ -69,6 +69,10 @@ Each tenant can keep its stacks as contracts in a Git branch (GitHub, GitLab, or
 - **Pull-based sync:** the tenant plane polls the branch, outbound only, and downloads a snapshot when the commit changes.
 - **Git-managed stacks:** it creates or updates stacks managed by Git, which can't be edited in the UI or API, and records the source commit.
 - **Automatic plans:** with `auto_plan`, a plan is queued for every new or changed contract. Plans keep the usual risk-based approvals. With `auto_apply_low_risk`, the system signs low-risk plans (non-production additions), recorded as `system:auto-deploy:<step>`.
+- **Folder layout:** `"layout": "nested"` arranges contracts as `<path>/<entity>/<bu>/<environment>/<stack>.json`.
+  - The environment comes from its folder. A file may still name it, but the two must match.
+  - The environment must belong to that entity and BU, so a contract filed under another unit is refused.
+  - The default `"flat"` layout keeps `<path>/<stack>.json`, with the environment named inside the file.
 - **Problems are reported, not applied:** invalid contracts are reported per file. A contract can't take over a stack managed in the UI, and removed contracts are reported as orphaned, never destroyed automatically.
 
 API: `GET/PUT /contracts`, `PUT /contracts/token` (read-only token, sealed with the tenant master key, never returned), and `POST /contracts/sync`. The development-only `local` provider needs `PRAVAHA_ALLOW_LOCAL_CONTRACTS=1`.
@@ -95,6 +99,22 @@ What the app is used for:
 - **Without it** (for example Kubernetes): the settings are sealed in the tenant database.
 
 Either way they are held in memory, so webhook deliveries and token minting never read the file or the database. For local development, `ngrok http 8090 --traffic-policy-file scripts/ngrok-webhooks.yml` exposes only `/webhooks/*`, and `scripts/dev-up.sh` picks up the tunnel or the `.env` value.
+
+## Organisation and resource labels
+
+- **Tenant:** a client company.
+- **Entity:** one of its products, with its own infrastructure.
+- **Business unit:** a unit inside an entity.
+- **Environment:** where a BU may deploy. It binds the BU to a cloud connection, a tier, a runner pool and guardrails. Environments are managed per BU under Tenant settings → Organisation.
+
+Entity and BU slugs never collide within a tenant; central refuses either if the other already uses the slug.
+
+Every resource a stack creates is labelled with `pravaha-tenant`, `pravaha-entity`, `pravaha-bu`, `pravaha-environment`, `pravaha-stack` and `managed-by=cloud-pravaha`:
+- AWS gets them as provider `default_tags`;
+- GCP gets them as provider `default_labels`;
+- Azure modules get them merged into their `tags` input, and the platform labels win over user tags with the same key.
+
+Values are normalised to the strictest rules, which are GCP's.
 
 ## Backporting: importing existing resources
 

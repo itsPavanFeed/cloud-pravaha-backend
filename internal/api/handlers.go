@@ -230,6 +230,7 @@ func (s *Server) build(ctx context.Context, stackName string, env *store.Environ
 	}
 	gen, err := st.Generate(s.catalog, spec.GenerateInput{
 		StackName: stackName, Environment: env.Name, Cloud: c, TofuVersion: s.cfg.TofuVersion,
+		Tenant: s.cfg.Tenant, Entity: env.Entity, BU: env.BU,
 	})
 	if err != nil {
 		return nil, nil, errLines(err)

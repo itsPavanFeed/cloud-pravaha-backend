@@ -36,14 +36,17 @@ const (
 
 // Config is a tenant's contracts repository. The token is stored separately, sealed.
 type Config struct {
-	Provider         string `json:"provider"`          // github | gitlab | local
-	Repo             string `json:"repo"`              // owner/name (GitHub), group/project (GitLab), directory (local)
-	Branch           string `json:"branch"`            // e.g. main
-	Path             string `json:"path"`              // folder holding contracts, e.g. stacks
-	APIURL           string `json:"api_url,omitempty"` // GitHub Enterprise / self-hosted GitLab API base
-	Auth             string `json:"auth,omitempty"`    // token (default) | github_app
-	PollSeconds      int    `json:"poll_seconds"`      // >= 30
-	AutoPlan         bool   `json:"auto_plan"`         // queue a plan for every new or changed contract
+	Provider string `json:"provider"`          // github | gitlab | local
+	Repo     string `json:"repo"`              // owner/name (GitHub), group/project (GitLab), directory (local)
+	Branch   string `json:"branch"`            // e.g. main
+	Path     string `json:"path"`              // folder holding contracts, e.g. stacks
+	APIURL   string `json:"api_url,omitempty"` // GitHub Enterprise / self-hosted GitLab API base
+	Auth     string `json:"auth,omitempty"`    // token (default) | github_app
+	// Layout of the folder: "flat" (<path>/<stack>.json, the environment in the
+	// file) or "nested" (<path>/<entity>/<bu>/<environment>/<stack>.json).
+	Layout           string `json:"layout,omitempty"`
+	PollSeconds      int    `json:"poll_seconds"` // >= 30
+	AutoPlan         bool   `json:"auto_plan"`    // queue a plan for every new or changed contract
 	AutoApplyLowRisk bool   `json:"auto_apply_low_risk"`
 	Enabled          bool   `json:"enabled"`
 }
@@ -77,6 +80,11 @@ func (c *Config) Validate(allowLocal bool) error {
 	default:
 		errs = append(errs, errors.New(`provider must be "github" or "gitlab"`))
 	}
+	switch c.Layout {
+	case "", "flat", "nested":
+	default:
+		errs = append(errs, errors.New(`layout must be "flat" or "nested"`))
+	}
 	switch c.Auth {
 	case "", "token":
 	case "github_app":
@@ -104,6 +112,8 @@ type Contract struct {
 	Name        string          `json:"name"`
 	Environment string          `json:"environment"`
 	Spec        json.RawMessage `json:"spec"`
+	Entity      string          `json:"-"` // nested layout: the entity (product) folder
+	BU          string          `json:"-"` // nested layout: the business unit folder
 }
 
 // Source fetches contracts from a Git host.
@@ -140,6 +150,14 @@ func New(c Config, token string, hc *http.Client) (Source, error) {
 // its stack (<name>.json); problems are returned per file so one bad contract
 // does not block the others.
 func Parse(files map[string][]byte, dir string) ([]Contract, map[string]string) {
+	return ParseLayout(files, dir, "flat")
+}
+
+// ParseLayout is Parse for a folder layout. With "nested", contracts live at
+// <dir>/<entity>/<bu>/<environment>/<stack>.json: the folders name the entity
+// (product), the business unit and the environment, and a file that also names
+// an environment must agree.
+func ParseLayout(files map[string][]byte, dir, layout string) ([]Contract, map[string]string) {
 	dir = strings.Trim(dir, "/")
 	var out []Contract
 	problems := map[string]string{}
@@ -149,7 +167,25 @@ func Parse(files map[string][]byte, dir string) ([]Contract, map[string]string) 
 	}
 	sort.Strings(names)
 	for _, f := range names {
-		if path.Ext(f) != ".json" || path.Dir(f) != firstNonEmpty(dir, ".") {
+		if path.Ext(f) != ".json" {
+			continue
+		}
+		var entity, bu, env string
+		if layout == "nested" {
+			rel, inside := f, true
+			if dir != "" {
+				rel, inside = strings.CutPrefix(f, dir+"/")
+			}
+			if !inside {
+				continue
+			}
+			parts := strings.Split(rel, "/")
+			if len(parts) != 4 {
+				problems[f] = "with the nested layout, contracts live at " + path.Join(dir, "<entity>/<bu>/<environment>/<stack>.json")
+				continue
+			}
+			entity, bu, env = parts[0], parts[1], parts[2]
+		} else if path.Dir(f) != firstNonEmpty(dir, ".") {
 			continue
 		}
 		var c Contract
@@ -162,6 +198,15 @@ func Parse(files map[string][]byte, dir string) ([]Contract, map[string]string) 
 		if stem := strings.TrimSuffix(path.Base(f), ".json"); c.Name != stem {
 			problems[f] = fmt.Sprintf("contract name %q must match its file name %q", c.Name, stem)
 			continue
+		}
+		if layout == "nested" {
+			if c.Environment == "" {
+				c.Environment = env
+			} else if c.Environment != env {
+				problems[f] = fmt.Sprintf("the file names environment %q but sits in folder %q", c.Environment, env)
+				continue
+			}
+			c.Entity, c.BU = entity, bu
 		}
 		c.File = f
 		out = append(out, c)
