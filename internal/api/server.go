@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/assistant"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/blob"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/catalog"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/certs"
@@ -49,6 +50,10 @@ type Server struct {
 	engine  orchestrator.Engine
 	wakeMu  sync.Mutex
 	wake    chan struct{} // closed to nudge long-polling runners when work is queued
+
+	assistant     *assistant.Assistant // nil = disabled
+	assistantDocs []assistant.Doc      // catalog, guide and runbooks
+	askLimiter    *httpx.Limiter
 }
 
 func New(cfg *config.Server, st *store.Store, cat *catalog.Catalog, sealer *secure.Sealer, iss *oidc.Issuer, log *slog.Logger) (*Server, error) {
@@ -57,7 +62,11 @@ func New(cfg *config.Server, st *store.Store, cat *catalog.Catalog, sealer *secu
 		return nil, err
 	}
 	srv := &Server{cfg: cfg, store: st, catalog: cat, sealer: sealer, issuer: iss, log: log, central: ck,
-		limiter: httpx.NewLimiter(10, time.Minute, 5*time.Minute), wake: make(chan struct{}), engine: orchestrator.Builtin{}}
+		limiter: httpx.NewLimiter(10, time.Minute, 5*time.Minute), wake: make(chan struct{}), engine: orchestrator.Builtin{},
+		askLimiter: httpx.NewLimiter(60, time.Hour, 15*time.Minute)}
+	if err := srv.enableAssistant(); err != nil {
+		return nil, err
+	}
 	if cfg.BucketURL != "" {
 		bc, err := blob.ParseURL(cfg.BucketURL, cfg.BucketAccessKey, cfg.BucketSecretKey)
 		if err != nil {
@@ -92,10 +101,12 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/connections", u(s.createConnection))
 	mux.Handle("GET /api/v1/connections/{id}", u(s.getConnection))
 	mux.Handle("PUT /api/v1/connections/{id}", u(s.updateConnection))
+	mux.Handle("DELETE /api/v1/connections/{id}", u(s.deleteConnection))
 	mux.Handle("GET /api/v1/environments", u(s.listEnvironments))
 	mux.Handle("POST /api/v1/environments", u(s.createEnvironment))
 	mux.Handle("GET /api/v1/environments/{id}", u(s.getEnvironment))
 	mux.Handle("PUT /api/v1/environments/{id}", u(s.updateEnvironment))
+	mux.Handle("DELETE /api/v1/environments/{id}", u(s.deleteEnvironment))
 	mux.Handle("GET /api/v1/stacks", u(s.listStacks))
 	mux.Handle("POST /api/v1/stacks", u(s.createStack))
 	mux.Handle("POST /api/v1/stacks/preview", u(s.previewStack))
@@ -119,9 +130,12 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/policies", u(s.listPolicies))
 	mux.Handle("POST /api/v1/policies", u(s.createPolicy))
 	mux.Handle("PUT /api/v1/policies/{id}", u(s.updatePolicy))
+	mux.Handle("DELETE /api/v1/policies/{id}", u(s.deletePolicy))
 	mux.Handle("POST /api/v1/policies/test", u(s.testPolicy))
 	mux.Handle("GET /api/v1/settings/risk", u(s.getRiskSettings))
 	mux.Handle("PUT /api/v1/settings/risk", u(s.putRiskSettings))
+	mux.Handle("GET /api/v1/assistant", u(s.assistantInfo))
+	mux.Handle("POST /api/v1/assistant/ask", u(s.askAssistant))
 	mux.Handle("GET /api/v1/runners", u(s.listRunners))
 	mux.Handle("POST /api/v1/runners", u(s.createRunner))
 	mux.Handle("DELETE /api/v1/runners/{id}", u(s.revokeRunner))

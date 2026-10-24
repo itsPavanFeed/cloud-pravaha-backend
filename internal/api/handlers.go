@@ -187,6 +187,29 @@ func (s *Server) updateEnvironment(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, e)
 }
 
+// deleteEnvironment removes an environment that has no stacks.
+func (s *Server) deleteEnvironment(w http.ResponseWriter, r *http.Request) {
+	p := user(r)
+	cur, err := s.store.GetEnvironment(r.Context(), r.PathValue("id"))
+	if err == nil && !p.CanView(cur.BU) {
+		err = store.ErrNotFound
+	}
+	if err != nil {
+		s.writeStoreErr(w, err, "")
+		return
+	}
+	if !p.CanManageEnvironments(cur.BU) {
+		writeErr(w, http.StatusForbidden, "managing environments needs tenant_admin, or admin of the business unit")
+		return
+	}
+	if err := s.store.DeleteEnvironment(r.Context(), cur.ID); err != nil {
+		s.writeStoreErr(w, err, "the environment still has stacks")
+		return
+	}
+	s.audit(r.Context(), p.Actor(), "environment.delete", "environment/"+cur.Name, cur.BU, cur)
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // ---- stacks ----
 
 type stackBody struct {

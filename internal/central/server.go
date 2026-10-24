@@ -727,6 +727,8 @@ func (s *Server) transport(t *Tenant) (http.RoundTripper, error) {
 	return rt, nil
 }
 
+const assistantTimeout = 5 * time.Minute
+
 // proxy forwards /api/v1/t/{tenant}/<rest> to the tenant plane as /api/v1/<rest>.
 func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 	u := current(r)
@@ -769,8 +771,14 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteErr(w, http.StatusBadGateway, "tenant "+slug+" is misconfigured")
 		return
 	}
+	if path == "/api/v1/assistant/ask" {
+		// The tenant streams progress while the assistant works, which can
+		// outlast the server's normal write timeout.
+		http.NewResponseController(w).SetWriteDeadline(time.Now().Add(assistantTimeout + 30*time.Second))
+	}
 	rp := &httputil.ReverseProxy{
-		Transport: rt,
+		Transport:     rt,
+		FlushInterval: -1, // pass streamed responses through as they arrive
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.Out.URL = target
 			pr.Out.Host = target.Host

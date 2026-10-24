@@ -866,3 +866,28 @@ func containsStr(xs []string, x string) bool {
 	}
 	return false
 }
+
+// deleteRow removes one row by ID. A row still referenced (an environment
+// with stacks, a connection with environments) is a conflict, not deleted.
+func (s *Store) deleteRow(ctx context.Context, table, id string) error {
+	tag, err := s.db.Exec(ctx, `DELETE FROM `+table+` WHERE id = $1`, id)
+	switch {
+	case IsReferenced(err):
+		return ErrConflict
+	case err != nil:
+		return err
+	case tag.RowsAffected() == 0:
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) DeleteConnection(ctx context.Context, id string) error {
+	return s.deleteRow(ctx, "cloud_connections", id)
+}
+func (s *Store) DeleteEnvironment(ctx context.Context, id string) error {
+	return s.deleteRow(ctx, "environments", id)
+}
+func (s *Store) DeletePolicySet(ctx context.Context, id string) error {
+	return s.deleteRow(ctx, "policy_sets", id)
+}

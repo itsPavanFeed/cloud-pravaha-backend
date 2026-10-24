@@ -106,6 +106,22 @@ func (s *Server) updatePolicy(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, p)
 }
 
+func (s *Server) deletePolicy(w http.ResponseWriter, r *http.Request) {
+	if !canWritePolicy(w, r) {
+		return
+	}
+	cur, err := s.store.GetPolicySet(r.Context(), r.PathValue("id"))
+	if err == nil {
+		err = s.store.DeletePolicySet(r.Context(), cur.ID)
+	}
+	if err != nil {
+		s.writeStoreErr(w, err, "")
+		return
+	}
+	s.audit(r.Context(), user(r).Actor(), "policy.delete", "policy/"+cur.Name, "", cur)
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // testPolicy is a dry run: it compiles a module and evaluates it against the
 // given input, or against a past run's plan.
 func (s *Server) testPolicy(w http.ResponseWriter, r *http.Request) {

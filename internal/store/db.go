@@ -97,6 +97,12 @@ func IsUnique(err error) bool {
 	return errors.As(err, &pe) && pe.Code == "23505"
 }
 
+// IsReferenced reports a foreign-key violation: the row is still in use.
+func IsReferenced(err error) bool {
+	var pe *pgconn.PgError
+	return errors.As(err, &pe) && pe.Code == "23503"
+}
+
 func NotFound(err error) error {
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotFound

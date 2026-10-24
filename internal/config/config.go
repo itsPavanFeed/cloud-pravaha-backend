@@ -40,6 +40,16 @@ type Server struct {
 
 	TemporalAddress   string // host:port of Temporal; empty = built-in orchestration
 	TemporalNamespace string
+
+	// The assistant (Claude with retrieval over the catalog, docs, policies and
+	// the caller's stacks). Off unless an API key is configured: enabling it
+	// sends that context to the Anthropic API.
+	AssistantAPIKey    string
+	AssistantBaseURL   string // optional gateway; server-side fallbacks are then off
+	AssistantModel     string
+	AssistantEffort    string // low | medium | high | xhigh | max
+	AssistantDocsDir   string // extra Markdown files to index (README, runbooks)
+	AssistantFallbacks bool
 }
 
 // Central configures the central plane: frontend, identity, tenant routing.
@@ -105,9 +115,26 @@ func LoadServer() (*Server, error) {
 
 		TemporalAddress:   os.Getenv("PRAVAHA_TEMPORAL_ADDRESS"),
 		TemporalNamespace: env("PRAVAHA_TEMPORAL_NAMESPACE", "default"),
+
+		AssistantAPIKey:    secret("PRAVAHA_ASSISTANT_API_KEY"),
+		AssistantBaseURL:   os.Getenv("PRAVAHA_ASSISTANT_BASE_URL"),
+		AssistantModel:     env("PRAVAHA_ASSISTANT_MODEL", "claude-opus-5-5"),
+		AssistantEffort:    env("PRAVAHA_ASSISTANT_EFFORT", "medium"),
+		AssistantDocsDir:   os.Getenv("PRAVAHA_ASSISTANT_DOCS_DIR"),
+		AssistantFallbacks: os.Getenv("PRAVAHA_ASSISTANT_FALLBACKS") != "0",
 	}
 	var errs []error
 	errs = append(errs, common(c.DatabaseURL, c.MasterKey, c.PublicURL, false)...)
+	switch c.AssistantEffort {
+	case "low", "medium", "high", "xhigh", "max":
+	default:
+		errs = append(errs, errors.New("PRAVAHA_ASSISTANT_EFFORT must be low, medium, high, xhigh or max"))
+	}
+	if c.AssistantBaseURL != "" {
+		if u, err := url.Parse(c.AssistantBaseURL); err != nil || u.Host == "" || !(u.Scheme == "https" || u.Scheme == "http" && loopbackHost(u.Hostname())) {
+			errs = append(errs, errors.New("PRAVAHA_ASSISTANT_BASE_URL must be an https URL (plain http only on loopback, for development)"))
+		}
+	}
 	if c.TLSCert == "" || c.TLSKey == "" {
 		errs = append(errs, errors.New("tenant planes always serve TLS: set PRAVAHA_TLS_CERT and PRAVAHA_TLS_KEY"))
 	}

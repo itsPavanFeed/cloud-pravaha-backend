@@ -38,6 +38,14 @@ spec:
             - { name: PRAVAHA_BUCKET_ACCESS_KEY_FILE, value: /secrets/bucket-access-key }
             - { name: PRAVAHA_BUCKET_SECRET_KEY_FILE, value: /secrets/bucket-secret-key }
             {{- end }}
+            {{- if .Values.assistant.enabled }}
+            - { name: PRAVAHA_ASSISTANT_API_KEY_FILE, value: /secrets/assistant-api-key }
+            - { name: PRAVAHA_ASSISTANT_MODEL, value: {{ .Values.assistant.model | quote }} }
+            - { name: PRAVAHA_ASSISTANT_EFFORT, value: {{ .Values.assistant.effort | quote }} }
+            {{- with .Values.assistant.baseURL }}
+            - { name: PRAVAHA_ASSISTANT_BASE_URL, value: {{ . | quote }} }
+            {{- end }}
+            {{- end }}
             {{- with .Values.temporal.address }}
             - { name: PRAVAHA_TEMPORAL_ADDRESS, value: {{ . | quote }} }
             - { name: PRAVAHA_TEMPORAL_NAMESPACE, value: {{ $.Values.temporal.namespace | quote }} }

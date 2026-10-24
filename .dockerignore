@@ -1,3 +1,5 @@
 .dev
 bin
 *.md
+!internal/assistant/guide.md
+terraform-provider-pravaha

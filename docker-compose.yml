@@ -115,6 +115,7 @@ services:
       PRAVAHA_CENTRAL_CA_FILE: /certs/ca.pem
       PRAVAHA_CENTRAL_CLIENT_CA: /certs/ca.pem
       PRAVAHA_TEMPORAL_ADDRESS: temporal:7233
+      PRAVAHA_ASSISTANT_API_KEY: ${PRAVAHA_ASSISTANT_API_KEY:-} # optional: enables the assistant
     volumes: ["certs:/certs:ro"]
     restart: unless-stopped
     networks: [internal]

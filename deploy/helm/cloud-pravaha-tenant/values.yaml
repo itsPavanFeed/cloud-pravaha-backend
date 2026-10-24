@@ -18,7 +18,7 @@ central:
   ingressFrom:
     - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: cloud-pravaha-central } }
 
-# Existing Secret with keys: database-url, master-key. Optional: bucket-access-key, bucket-secret-key.
+# Existing Secret with keys: database-url, master-key. Optional: bucket-access-key, bucket-secret-key, assistant-api-key.
 existingSecret: cloud-pravaha-tenant
 
 tls:
@@ -30,6 +30,13 @@ tls:
 
 bucket:
   url: ""        # s3://bucket[/prefix]?endpoint=https://...&region=...
+
+# The assistant sends questions and retrieved passages to the Anthropic API (or baseURL).
+assistant:
+  enabled: false   # needs assistant-api-key in existingSecret
+  model: claude-opus-5-5
+  effort: medium
+  baseURL: ""
 
 temporal:
   address: ""    # e.g. temporal-frontend.temporal:7233

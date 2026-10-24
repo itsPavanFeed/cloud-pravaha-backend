@@ -120,3 +120,20 @@ func (s *Server) updateConnection(w http.ResponseWriter, r *http.Request) {
 	s.audit(r.Context(), user(r).Actor(), "connection.update", "connection/"+c.Name, "", map[string]any{"before": cur, "after": c})
 	writeJSON(w, 200, c)
 }
+
+// deleteConnection removes a connection no environment uses.
+func (s *Server) deleteConnection(w http.ResponseWriter, r *http.Request) {
+	if !tenantAdmin(w, r) {
+		return
+	}
+	cur, err := s.store.GetConnection(r.Context(), r.PathValue("id"))
+	if err == nil {
+		err = s.store.DeleteConnection(r.Context(), cur.ID)
+	}
+	if err != nil {
+		s.writeStoreErr(w, err, "environments still use this connection; delete or move them first")
+		return
+	}
+	s.audit(r.Context(), user(r).Actor(), "connection.delete", "connection/"+cur.Name, "", cur)
+	w.WriteHeader(http.StatusNoContent)
+}

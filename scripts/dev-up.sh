@@ -54,6 +54,14 @@ CENTRAL=http://127.0.0.1:$CP
 PIDS=()
 trap 'kill "${PIDS[@]}" 2>/dev/null; wait 2>/dev/null' EXIT INT TERM
 
+# The assistant: a real key in PRAVAHA_ASSISTANT_API_KEY is passed through;
+# DEV_ASSISTANT=fake uses the scripted stand-in from the e2e test instead.
+if [[ "${DEV_ASSISTANT:-}" == fake ]]; then
+  python3 "$ROOT/cloud-pravaha-test-resources/e2e/fake-claude.py" 18998 dev-fake-key >"$DEV/fake-claude.log" 2>&1 &
+  PIDS+=($!)
+  export PRAVAHA_ASSISTANT_API_KEY=dev-fake-key PRAVAHA_ASSISTANT_BASE_URL=http://127.0.0.1:18998
+fi
+
 PRAVAHA_DATABASE_URL="$(dburl central)" PRAVAHA_MASTER_KEY="$CENTRAL_MASTER_KEY" PRAVAHA_LISTEN=127.0.0.1:$CP \
 PRAVAHA_PUBLIC_URL="$CENTRAL" PRAVAHA_INSECURE_HTTP=1 PRAVAHA_WEB_DIR="$WEB/dist" \
 PRAVAHA_CLIENT_CERT="$C/central-client.pem" PRAVAHA_CLIENT_KEY="$C/central-client-key.pem" \
