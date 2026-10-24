@@ -126,18 +126,24 @@ func keys(m map[string][]byte) string {
 
 func TestNestedLayout(t *testing.T) {
 	files := map[string][]byte{
-		"stacks/retail/payments/payments-prod/api.json": []byte(`{"name":"api","spec":{"modules":[]}}`),
-		"stacks/retail/payments/payments-dev/web.json":  []byte(`{"name":"web","environment":"payments-dev","spec":{"modules":[]}}`),
-		"stacks/retail/payments/payments-dev/bad.json":  []byte(`{"name":"bad","environment":"payments-prod","spec":{"modules":[]}}`),
-		"stacks/retail/payments/shallow.json":           []byte(`{"name":"shallow","spec":{"modules":[]}}`),
-		"stacks/loose.json":                             []byte(`{"name":"loose","environment":"x","spec":{"modules":[]}}`),
-		"docs/readme.json":                              []byte(`{}`),
+		"stacks/retail/prod/payments/api.json": []byte(`{"name":"api","spec":{"modules":[]}}`),
+		"stacks/retail/dev/checkout/web.json":  []byte(`{"name":"web","environment":"dev","bu":"checkout","spec":{"modules":[]}}`),
+		"stacks/retail/dev/checkout/bad.json":  []byte(`{"name":"bad","environment":"prod","spec":{"modules":[]}}`),
+		"stacks/retail/dev/checkout/bu.json":   []byte(`{"name":"bu","bu":"payments","spec":{"modules":[]}}`),
+		"stacks/retail/dev/shallow.json":       []byte(`{"name":"shallow","spec":{"modules":[]}}`),
+		"stacks/loose.json":                    []byte(`{"name":"loose","environment":"x","spec":{"modules":[]}}`),
+		"docs/readme.json":                     []byte(`{}`),
 	}
 	cs, probs := ParseLayout(files, "stacks", "nested")
-	if len(cs) != 2 || cs[1].Name != "api" || cs[1].Environment != "payments-prod" || cs[1].BU != "payments" || cs[1].Entity != "retail" || cs[0].Environment != "payments-dev" {
+	if len(cs) != 2 || cs[0].Name != "web" || cs[0].BU != "checkout" || cs[1].Name != "api" || cs[1].Environment != "prod" || cs[1].BU != "payments" || cs[1].Entity != "retail" {
 		t.Fatalf("contracts = %+v", cs)
 	}
-	if len(probs) != 3 || probs["stacks/loose.json"] == "" || probs["stacks/retail/payments/payments-dev/bad.json"] == "" {
+	for _, f := range []string{"stacks/retail/dev/checkout/bad.json", "stacks/retail/dev/checkout/bu.json", "stacks/retail/dev/shallow.json", "stacks/loose.json"} {
+		if probs[f] == "" {
+			t.Fatalf("no problem for %s: %v", f, probs)
+		}
+	}
+	if len(probs) != 4 {
 		t.Fatalf("problems = %v", probs)
 	}
 	if err := (&Config{Provider: "github", Repo: "a/b", Branch: "main", Path: "stacks", PollSeconds: 60, Layout: "deep"}).Validate(false); err == nil {

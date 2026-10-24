@@ -69,10 +69,12 @@ Each tenant can keep its stacks as contracts in a Git branch (GitHub, GitLab, or
 - **Pull-based sync:** the tenant plane polls the branch, outbound only, and downloads a snapshot when the commit changes.
 - **Git-managed stacks:** it creates or updates stacks managed by Git, which can't be edited in the UI or API, and records the source commit.
 - **Automatic plans:** with `auto_plan`, a plan is queued for every new or changed contract. Plans keep the usual risk-based approvals. With `auto_apply_low_risk`, the system signs low-risk plans (non-production additions), recorded as `system:auto-deploy:<step>`.
-- **Folder layout:** `"layout": "nested"` arranges contracts as `<path>/<entity>/<bu>/<environment>/<stack>.json`.
-  - The environment comes from its folder. A file may still name it, but the two must match.
-  - The environment must belong to that entity and BU, so a contract filed under another unit is refused.
-  - The default `"flat"` layout keeps `<path>/<stack>.json`, with the environment named inside the file.
+- **Folder layout:** `"layout": "nested"` arranges contracts as `<path>/<entity>/<environment>/<bu>/<stack>.json`.
+  - The entity's environments are shared by its BUs, so the folders name the entity, then the environment, then the owning BU.
+  - A file may also name the environment or BU, but it must agree with the folders.
+  - A BU filed under another entity is refused.
+  - The default `"flat"` layout keeps `<path>/<stack>.json`, with `"bu"` and `"environment"` inside the file.
+  - The tenant plane checks BUs against a directory of the tenant's BUs and their entities. It learns this from central's signed requests and persists it.
 - **Problems are reported, not applied:** invalid contracts are reported per file. A contract can't take over a stack managed in the UI, and removed contracts are reported as orphaned, never destroyed automatically.
 
 API: `GET/PUT /contracts`, `PUT /contracts/token` (read-only token, sealed with the tenant master key, never returned), and `POST /contracts/sync`. The development-only `local` provider needs `PRAVAHA_ALLOW_LOCAL_CONTRACTS=1`.
@@ -105,7 +107,11 @@ Either way they are held in memory, so webhook deliveries and token minting neve
 - **Tenant:** a client company.
 - **Entity:** one of its products, with its own infrastructure.
 - **Business unit:** a unit inside an entity.
-- **Environment:** where a BU may deploy. It binds the BU to a cloud connection, a tier, a runner pool and guardrails. Environments are managed per BU under Tenant settings → Organisation.
+- **Environment:** belongs to an entity and is shared by every BU of that entity, for example retail's `dev`, `staging` and `prod`. It binds a cloud connection, a tier, a runner pool and guardrails.
+  - Names are unique within the entity, so platform can also have `dev`.
+  - Address an environment as `entity:name` when the name alone is ambiguous.
+  - Tenant admins and the entity's admins manage environments, under Tenant settings → Organisation.
+- **Stacks:** a stack names its owning BU and one of that BU's entity's environments (`{"name","bu","environment","spec"}`). The `bu` can be left out when the caller can write to only one BU of that entity.
 
 Entity and BU slugs never collide within a tenant; central refuses either if the other already uses the slug.
 
@@ -300,7 +306,7 @@ pravaha dev-cert -dir certs -name tenant -host pravaha.acme.internal [-client]
 Tenant plane API (reached as `/api/v1/t/{t}/…`):
 - `catalog`
 - `connections` (tenant admins register and delete unused ones; everyone reads)
-- `environments` (`{"name","bu","tier","connection",…}`; DELETE only without stacks)
+- `environments` (`{"name","entity","tier","connection",…}`, shared by the entity's BUs; addressed by ID or `entity:name`; DELETE only without stacks)
 - `stacks` (and `stacks/preview`, `stacks/{id}/runs`, `stacks/{id}/state-versions`)
 - `runs/{id}`, `runs/{id}/logs`, `runs/{id}/approve` with `{"step": "manager"|"finops"|"security", "reason"}`, and `runs/{id}/discard`
 - `audit`, `audit/verify`

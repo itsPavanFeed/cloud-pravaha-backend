@@ -115,7 +115,7 @@ if [[ -n "$FRESH" || ! -f "$DEV/tokens.env" ]]; then
   done
   for f in "$RES"/connections/*.json; do call "$TINA" POST /api/v1/t/acme/connections "@$f" >/dev/null; done
   RUNNER_TOKEN=$(call "$TINA" POST /api/v1/t/acme/runners '{"name":"dev-runner","pool":"default"}' | J secret)
-  for f in payments-dev payments-prod data-dev; do call "$TINA" POST /api/v1/t/acme/environments "@$RES/environments/$f.json" >/dev/null; done
+  for f in retail-dev retail-prod platform-dev; do call "$TINA" POST /api/v1/t/acme/environments "@$RES/environments/$f.json" >/dev/null; done
   ALICE=$(tok "$TINA" alice@acme.local)
   for f in local-naming prod-naming; do call "$ALICE" POST /api/v1/t/acme/stacks "@$RES/stacks/$f.json" >/dev/null; done
   umask 077

@@ -231,14 +231,21 @@ func (s *Server) syncContracts(ctx context.Context, force bool) (*SyncStatus, er
 func (s *Server) applyContract(ctx context.Context, cfg *contracts.Config, c contracts.Contract, rev, actor string) SyncResult {
 	res := SyncResult{File: c.File, Stack: c.Name}
 	errOut := func(msg string) SyncResult { res.Action, res.Error = "error", msg; return res }
-	env, err := s.store.GetEnvironment(ctx, c.Environment)
+	if c.BU == "" {
+		return errOut(`the contract must name its business unit ("bu")`)
+	}
+	entity, ok := s.buEntity(c.BU)
+	if !ok {
+		return errOut("unknown business unit " + c.BU)
+	}
+	if c.Entity != "" && c.Entity != entity {
+		return errOut(fmt.Sprintf("business unit %s belongs to %s, not folder %s", c.BU, entity, c.Entity))
+	}
+	env, err := s.store.EntityEnvironment(ctx, entity, c.Environment)
 	if err != nil {
-		return errOut("unknown environment " + c.Environment)
+		return errOut(fmt.Sprintf("entity %s has no environment %s", entity, c.Environment))
 	}
-	if c.BU != "" && (env.BU != c.BU || env.Entity != c.Entity) {
-		return errOut(fmt.Sprintf("environment %s belongs to %s/%s, not folder %s/%s", env.Name, env.Entity, env.BU, c.Entity, c.BU))
-	}
-	gen, _, probs := s.build(ctx, c.Name, env, c.Spec)
+	gen, _, probs := s.build(ctx, c.Name, c.BU, env, c.Spec)
 	if probs != nil {
 		return errOut(strings.Join(probs, "; "))
 	}
@@ -246,7 +253,7 @@ func (s *Server) applyContract(ctx context.Context, cfg *contracts.Config, c con
 	existing, err := s.store.GetStack(ctx, c.Name)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
-		st, err := s.store.CreateManagedStack(ctx, c.Name, env.BU, env.Entity, env.ID, spec, actor, "git", rev)
+		st, err := s.store.CreateManagedStack(ctx, c.Name, c.BU, env.Entity, env.ID, spec, actor, "git", rev)
 		if err != nil {
 			return errOut("could not create the stack: " + err.Error())
 		}
@@ -257,8 +264,8 @@ func (s *Server) applyContract(ctx context.Context, cfg *contracts.Config, c con
 		return errOut(err.Error())
 	case existing.ManagedBy != "git":
 		return errOut("a stack with this name exists and is managed in the UI")
-	case existing.EnvironmentID != env.ID:
-		return errOut("a stack cannot move to another environment; use a new name")
+	case existing.EnvironmentID != env.ID || existing.BU != c.BU:
+		return errOut("a stack cannot move to another environment or business unit; use a new name")
 	case sameJSON(existing.Spec, spec):
 		res.Action = "unchanged"
 		return res

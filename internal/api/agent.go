@@ -105,7 +105,7 @@ func (s *Server) startJob(w http.ResponseWriter, r *http.Request, run *store.Run
 		fail("environment not found")
 		return
 	}
-	gen, cloud, probs := s.build(ctx, st.Name, env, st.Spec)
+	gen, cloud, probs := s.build(ctx, st.Name, st.BU, env, st.Spec)
 	if probs != nil {
 		fail("stack no longer validates: " + probs[0])
 		return
@@ -125,8 +125,8 @@ func (s *Server) startJob(w http.ResponseWriter, r *http.Request, run *store.Run
 	job.CloudEnv, job.CloudFiles = cloud.PhaseCredentials(st.Name, phase)
 	if cloud.NeedsOIDCToken() {
 		job.OIDCToken, err = s.issuer.Sign(oidc.Claims{
-			Subject: oidc.Subject(env.Name, st.Name, phase), Audience: cloud.Audience(),
-			Environment: env.Name, Stack: st.Name, RunID: run.ID, Phase: phase, TTL: oidcTokenTTL,
+			Subject: oidc.Subject(env.Entity, env.Name, st.Name, phase), Audience: cloud.Audience(),
+			Entity: env.Entity, Environment: env.Name, Stack: st.Name, RunID: run.ID, Phase: phase, TTL: oidcTokenTTL,
 		}, time.Now())
 		if err != nil {
 			fail("could not issue the run's OIDC token")
@@ -275,7 +275,7 @@ func (s *Server) recordDrift(w http.ResponseWriter, r *http.Request, run *store.
 	s.audit(ctx, who(r).Subject(), "run.drift", "run/"+run.ID, run.BU, map[string]any{"stack": st.Name, "status": status, "resources": drifted})
 	if status == "drifted" && st.Drift.AutoRemediate {
 		if env, err := s.store.GetEnvironment(ctx, st.EnvironmentID); err == nil {
-			if gen, _, probs := s.build(ctx, st.Name, env, st.Spec); probs == nil {
+			if gen, _, probs := s.build(ctx, st.Name, st.BU, env, st.Spec); probs == nil {
 				if fix, err := s.store.CreateRun(ctx, st.ID, "apply", "system:drift-remediation", gen.Hash); err == nil {
 					s.audit(ctx, "system:drift-remediation", "run.create", "run/"+fix.ID, st.BU, map[string]string{"stack": st.Name, "operation": "apply", "reason": "drift found by run " + run.ID})
 					s.runCreated(ctx, fix.ID)
@@ -320,7 +320,7 @@ func (s *Server) queueDueDrift(ctx context.Context) []string {
 		if err != nil {
 			continue
 		}
-		gen, _, probs := s.build(ctx, st.Name, env, st.Spec)
+		gen, _, probs := s.build(ctx, st.Name, st.BU, env, st.Spec)
 		if probs != nil {
 			continue
 		}

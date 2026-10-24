@@ -43,7 +43,7 @@ type Config struct {
 	APIURL   string `json:"api_url,omitempty"` // GitHub Enterprise / self-hosted GitLab API base
 	Auth     string `json:"auth,omitempty"`    // token (default) | github_app
 	// Layout of the folder: "flat" (<path>/<stack>.json, the environment in the
-	// file) or "nested" (<path>/<entity>/<bu>/<environment>/<stack>.json).
+	// file) or "nested" (<path>/<entity>/<environment>/<bu>/<stack>.json).
 	Layout           string `json:"layout,omitempty"`
 	PollSeconds      int    `json:"poll_seconds"` // >= 30
 	AutoPlan         bool   `json:"auto_plan"`    // queue a plan for every new or changed contract
@@ -112,8 +112,8 @@ type Contract struct {
 	Name        string          `json:"name"`
 	Environment string          `json:"environment"`
 	Spec        json.RawMessage `json:"spec"`
-	Entity      string          `json:"-"` // nested layout: the entity (product) folder
-	BU          string          `json:"-"` // nested layout: the business unit folder
+	BU          string          `json:"bu,omitempty"` // the owning business unit (from the folder in the nested layout)
+	Entity      string          `json:"-"`            // nested layout: the entity (product) folder
 }
 
 // Source fetches contracts from a Git host.
@@ -154,9 +154,9 @@ func Parse(files map[string][]byte, dir string) ([]Contract, map[string]string) 
 }
 
 // ParseLayout is Parse for a folder layout. With "nested", contracts live at
-// <dir>/<entity>/<bu>/<environment>/<stack>.json: the folders name the entity
-// (product), the business unit and the environment, and a file that also names
-// an environment must agree.
+// <dir>/<entity>/<environment>/<bu>/<stack>.json: the entity's (product's)
+// environments are shared by its business units. A file that also names the
+// environment or BU must agree with its folders.
 func ParseLayout(files map[string][]byte, dir, layout string) ([]Contract, map[string]string) {
 	dir = strings.Trim(dir, "/")
 	var out []Contract
@@ -181,10 +181,10 @@ func ParseLayout(files map[string][]byte, dir, layout string) ([]Contract, map[s
 			}
 			parts := strings.Split(rel, "/")
 			if len(parts) != 4 {
-				problems[f] = "with the nested layout, contracts live at " + path.Join(dir, "<entity>/<bu>/<environment>/<stack>.json")
+				problems[f] = "with the nested layout, contracts live at " + path.Join(dir, "<entity>/<environment>/<bu>/<stack>.json")
 				continue
 			}
-			entity, bu, env = parts[0], parts[1], parts[2]
+			entity, env, bu = parts[0], parts[1], parts[2]
 		} else if path.Dir(f) != firstNonEmpty(dir, ".") {
 			continue
 		}
@@ -204,6 +204,10 @@ func ParseLayout(files map[string][]byte, dir, layout string) ([]Contract, map[s
 				c.Environment = env
 			} else if c.Environment != env {
 				problems[f] = fmt.Sprintf("the file names environment %q but sits in folder %q", c.Environment, env)
+				continue
+			}
+			if c.BU != "" && c.BU != bu {
+				problems[f] = fmt.Sprintf("the file names business unit %q but sits in folder %q", c.BU, bu)
 				continue
 			}
 			c.Entity, c.BU = entity, bu

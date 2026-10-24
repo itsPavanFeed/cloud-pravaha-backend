@@ -108,8 +108,8 @@ func newTestAssistant(t *testing.T, f *fakeClaude, cfg Config) *Assistant {
 func TestAskSearchesProposesAndCites(t *testing.T) {
 	f := &fakeClaude{replies: []string{
 		message("tool_use", text("Let me look."), toolUse("t1", "search_knowledge", `{"query":"eks inputs","kind":"catalog"}`)),
-		message("tool_use", toolUse("t2", "propose_stack", `{"name":"Bad Name","environment":"aws-prod","spec":{"modules":[]}}`)),
-		message("tool_use", toolUse("t3", "propose_stack", `{"name":"payments-eks","environment":"aws-prod","spec":{"modules":[{"name":"cluster","module":"aws-eks","inputs":{"name":"payments","kubernetes_version":"1.33"}}]}}`)),
+		message("tool_use", toolUse("t2", "propose_stack", `{"name":"Bad Name","bu":"payments","environment":"aws-prod","spec":{"modules":[]}}`)),
+		message("tool_use", toolUse("t3", "propose_stack", `{"name":"payments-eks","bu":"payments","environment":"aws-prod","spec":{"modules":[{"name":"cluster","module":"aws-eks","inputs":{"name":"payments","kubernetes_version":"1.33"}}]}}`)),
 		message("end_turn", text("Use [catalog:aws-eks] — its endpoint is private [catalog:aws-eks]. See also [catalog:made-up].")),
 	}}
 	a := newTestAssistant(t, f, Config{Effort: "high", Fallbacks: false})
@@ -119,10 +119,10 @@ func TestAskSearchesProposesAndCites(t *testing.T) {
 		Question: "Set up an EKS cluster for payments",
 		Index:    NewIndex(CatalogDocs(testCatalog(t)), GuideDocs()),
 		Environments: []Environment{
-			{Name: "aws-prod", BU: "payments", Tier: "prod", Cloud: "aws", Writable: true},
-			{Name: "aws-data", BU: "data", Tier: "nonprod", Cloud: "aws", Writable: false},
+			{Name: "aws-prod", Entity: "retail", Tier: "prod", Cloud: "aws", Writable: true, WritableBUs: []string{"payments"}},
+			{Name: "aws-data", Entity: "platform", Tier: "nonprod", Cloud: "aws", Writable: false, WritableBUs: []string{}},
 		},
-		Validate: func(_ context.Context, name, env string, raw json.RawMessage) []string {
+		Validate: func(_ context.Context, name, bu, env string, raw json.RawMessage) []string {
 			validated = append(validated, name)
 			if name != "payments-eks" {
 				return []string{"bad stack name"}
@@ -134,7 +134,7 @@ func TestAskSearchesProposesAndCites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ans.Draft == nil || ans.Draft.Name != "payments-eks" || ans.Draft.Environment != "aws-prod" {
+	if ans.Draft == nil || ans.Draft.Name != "payments-eks" || ans.Draft.BU != "payments" || ans.Draft.Environment != "aws-prod" {
 		t.Fatalf("draft = %+v", ans.Draft)
 	}
 	if len(validated) != 2 {
@@ -194,14 +194,14 @@ func TestAskSearchesProposesAndCites(t *testing.T) {
 
 func TestProposalOutsideWritableEnvironmentsIsRejected(t *testing.T) {
 	f := &fakeClaude{replies: []string{
-		message("tool_use", toolUse("t1", "propose_stack", `{"name":"x","environment":"aws-data","spec":{"modules":[]}}`)),
+		message("tool_use", toolUse("t1", "propose_stack", `{"name":"x","bu":"data","environment":"aws-data","spec":{"modules":[]}}`)),
 		message("end_turn", text("You cannot create stacks there.")),
 	}}
 	a := newTestAssistant(t, f, Config{})
 	ans, err := a.Ask(context.Background(), Request{
 		Question: "make a bucket in data", Index: NewIndex(),
 		Environments: []Environment{{Name: "aws-data", Writable: false}},
-		Validate: func(context.Context, string, string, json.RawMessage) []string {
+		Validate: func(context.Context, string, string, string, json.RawMessage) []string {
 			t.Fatal("must not validate")
 			return nil
 		},

@@ -55,8 +55,9 @@ type Server struct {
 	assistant     *assistant.Assistant // nil = disabled
 	assistantDocs []assistant.Doc      // catalog, guide and runbooks
 	askLimiter    *httpx.Limiter
-	gh            ghCache                    // GitHub App with its token cache
-	ghSnap        atomic.Pointer[ghSettings] // GitHub App settings, reloaded on change
+	gh            ghCache                           // GitHub App with its token cache
+	ghSnap        atomic.Pointer[ghSettings]        // GitHub App settings, reloaded on change
+	dirSnap       atomic.Pointer[map[string]string] // business unit → entity, learned from central
 }
 
 func New(cfg *config.Server, st *store.Store, cat *catalog.Catalog, sealer *secure.Sealer, iss *oidc.Issuer, log *slog.Logger) (*Server, error) {
@@ -70,6 +71,7 @@ func New(cfg *config.Server, st *store.Store, cat *catalog.Catalog, sealer *secu
 	if err := srv.enableAssistant(); err != nil {
 		return nil, err
 	}
+	srv.loadDirectory(context.Background())
 	if err := srv.ghReload(context.Background()); err != nil {
 		return nil, fmt.Errorf("loading GitHub App settings: %w", err)
 	}
@@ -395,6 +397,7 @@ func (s *Server) authUser(h http.HandlerFunc) http.Handler {
 			s.log.Warn("assertion rejected", "err", err, "ip", clientIP(r))
 			return false
 		}
+		s.noteDirectory(r.Context(), p.BUEntity)
 		h(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, &principal{Kind: "user", User: p})))
 		return true
 	})

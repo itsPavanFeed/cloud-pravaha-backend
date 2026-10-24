@@ -61,7 +61,7 @@ func (s *Server) getConnection(w http.ResponseWriter, r *http.Request) {
 		resp["oidc"] = map[string]string{
 			"issuer":          s.issuer.URL,
 			"audience":        cl.Audience(),
-			"subject_pattern": "pravaha:env:*:stack:*",
+			"subject_pattern": "pravaha:entity:*:env:*:stack:*",
 		}
 	}
 	writeJSON(w, 200, resp)

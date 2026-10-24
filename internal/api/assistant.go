@@ -86,8 +86,8 @@ func (s *Server) askAssistant(w http.ResponseWriter, r *http.Request) {
 
 	ans, err := s.assistant.Ask(ctx, assistant.Request{
 		Question: b.Question, History: b.History, Index: ix, Environments: envs,
-		Validate: func(ctx context.Context, name, envName string, raw json.RawMessage) []string {
-			return s.validateDraft(ctx, r, name, envName, raw)
+		Validate: func(ctx context.Context, name, bu, envName string, raw json.RawMessage) []string {
+			return s.validateDraft(ctx, r, name, bu, envName, raw)
 		},
 		Progress: func(t string) { emit(map[string]string{"type": "status", "text": t}) },
 	})
@@ -116,7 +116,7 @@ func (s *Server) assistantCorpus(ctx context.Context, r *http.Request) (*assista
 	p := user(r)
 	var docs []assistant.Doc
 	var envs []assistant.Environment
-	es, err := s.store.ListEnvironments(ctx, visible(r))
+	es, err := s.store.ListEnvironments(ctx, p.VisibleEntities())
 	if err != nil {
 		return nil, nil, err
 	}
@@ -131,11 +131,12 @@ func (s *Server) assistantCorpus(ctx context.Context, r *http.Request) (*assista
 				region = c.GCP.Region + ", project " + c.GCP.ProjectID
 			}
 		}
-		writable := p.CanChange(e.BU)
-		envs = append(envs, assistant.Environment{Name: e.Name, BU: e.BU, Tier: e.Tier, Cloud: cloud, Writable: writable})
+		bus := p.WritableBUs(e.Entity)
+		writable := len(bus) > 0
+		envs = append(envs, assistant.Environment{Name: e.Name, Entity: e.Entity, WritableBUs: bus, Tier: e.Tier, Cloud: cloud, Writable: writable})
 		docs = append(docs, assistant.Doc{ID: "environment:" + e.Name, Kind: "environment", Title: "Environment " + e.Name,
-			Text: fmt.Sprintf("Environment %q: business unit %s (entity %s), tier %s, cloud %s %s, connection %s, runner pool %s, destroys allowed: %v, max destroys per run: %d. The person can create stacks here: %v.",
-				e.Name, e.BU, e.Entity, e.Tier, cloud, region, e.Connection, e.RunnerPool, e.AllowDestroy, e.MaxDestroys, writable)})
+			Text: fmt.Sprintf("Environment %q of entity (product) %s, shared by all its business units: tier %s, cloud %s %s, connection %s, runner pool %s, destroys allowed: %v, max destroys per run: %d. Business units the person can create stacks for here: %v.",
+				e.Name, e.Entity, e.Tier, cloud, region, e.Connection, e.RunnerPool, e.AllowDestroy, e.MaxDestroys, bus)})
 	}
 	sts, err := s.store.ListStacks(ctx, visible(r))
 	if err != nil {
@@ -169,17 +170,21 @@ func (s *Server) assistantCorpus(ctx context.Context, r *http.Request) (*assista
 }
 
 // validateDraft runs the same checks as creating the stack, without saving.
-func (s *Server) validateDraft(ctx context.Context, r *http.Request, name, envName string, raw json.RawMessage) []string {
+func (s *Server) validateDraft(ctx context.Context, r *http.Request, name, bu, envName string, raw json.RawMessage) []string {
 	var probs []string
 	if !spec.StackNameRe.MatchString(name) {
 		probs = append(probs, "the stack name must be lowercase letters, digits and dashes")
 		name = "draft"
 	}
-	env, err := s.store.GetEnvironment(ctx, envName)
-	if err != nil || !user(r).CanChange(env.BU) {
-		return append(probs, fmt.Sprintf("environment %q does not exist or the person cannot create stacks there", envName))
+	p := user(r)
+	if !p.CanChange(bu) {
+		return append(probs, fmt.Sprintf("the person cannot create stacks in business unit %q", bu))
 	}
-	if _, _, more := s.build(ctx, name, env, raw); more != nil {
+	env, err := s.store.EntityEnvironment(ctx, p.EntityOf(bu), envName)
+	if err != nil {
+		return append(probs, fmt.Sprintf("business unit %s's entity has no environment %q", bu, envName))
+	}
+	if _, _, more := s.build(ctx, name, bu, env, raw); more != nil {
 		probs = append(probs, more...)
 	}
 	return probs

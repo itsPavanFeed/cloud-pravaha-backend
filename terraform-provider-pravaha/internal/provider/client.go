@@ -142,7 +142,7 @@ type Connection struct {
 type Environment struct {
 	ID           string `json:"id,omitempty"`
 	Name         string `json:"name"`
-	BU           string `json:"bu"`
+	Entity       string `json:"entity"`
 	Tier         string `json:"tier"`
 	Connection   string `json:"connection"`
 	RunnerPool   string `json:"runner_pool"`

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/identity"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/policy"
@@ -45,7 +46,7 @@ func (s *Server) getCatalog(w http.ResponseWriter, r *http.Request) {
 
 type envBody struct {
 	Name         string `json:"name"`
-	BU           string `json:"bu"`
+	Entity       string `json:"entity"` // the product the environment belongs to; all its BUs may deploy here
 	Tier         string `json:"tier"`
 	Connection   string `json:"connection"` // cloud connection name; "" = no cloud
 	RunnerPool   string `json:"runner_pool"`
@@ -58,8 +59,8 @@ func (b *envBody) validate(create bool) []string {
 	if create && !envNameRe.MatchString(b.Name) {
 		probs = append(probs, "name must be lowercase letters, digits and dashes (2-32)")
 	}
-	if create && !identity.SlugRe.MatchString(b.BU) {
-		probs = append(probs, "bu must be the business unit's slug")
+	if create && !identity.SlugRe.MatchString(b.Entity) {
+		probs = append(probs, "entity must be the entity's (product's) slug")
 	}
 	if b.Tier != risk.TierProd && b.Tier != risk.TierNonProd {
 		probs = append(probs, `tier must be "prod" or "nonprod"`)
@@ -73,9 +74,9 @@ func (b *envBody) validate(create bool) []string {
 	return probs
 }
 
-// connectionFor resolves an environment's connection and checks the BU's
-// entity may use it. An empty name means no cloud.
-func (s *Server) connectionFor(w http.ResponseWriter, r *http.Request, name, bu string) (*string, bool) {
+// connectionFor resolves an environment's connection and checks the entity may
+// use it. An empty name means no cloud.
+func (s *Server) connectionFor(w http.ResponseWriter, r *http.Request, name, entity string) (*string, bool) {
 	if name == "" {
 		return nil, true
 	}
@@ -84,7 +85,7 @@ func (s *Server) connectionFor(w http.ResponseWriter, r *http.Request, name, bu 
 		writeErr(w, 422, "unknown cloud connection "+name)
 		return nil, false
 	}
-	if entity := user(r).EntityOf(bu); !c.Allows(entity) {
+	if !c.Allows(entity) {
 		writeErr(w, http.StatusForbidden, "cloud connection "+c.Name+" is not available to entity "+entity)
 		return nil, false
 	}
@@ -92,7 +93,7 @@ func (s *Server) connectionFor(w http.ResponseWriter, r *http.Request, name, bu 
 }
 
 func (s *Server) listEnvironments(w http.ResponseWriter, r *http.Request) {
-	envs, err := s.store.ListEnvironments(r.Context(), visible(r))
+	envs, err := s.store.ListEnvironments(r.Context(), user(r).VisibleEntities())
 	if err != nil {
 		s.writeStoreErr(w, err, "")
 		return
@@ -102,7 +103,7 @@ func (s *Server) listEnvironments(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) getEnvironment(w http.ResponseWriter, r *http.Request) {
 	e, err := s.store.GetEnvironment(r.Context(), r.PathValue("id"))
-	if err == nil && !user(r).CanView(e.BU) {
+	if err == nil && !user(r).CanViewEntity(e.Entity) {
 		err = store.ErrNotFound
 	}
 	if err != nil {
@@ -114,7 +115,7 @@ func (s *Server) getEnvironment(w http.ResponseWriter, r *http.Request) {
 		resp["oidc"] = map[string]string{
 			"issuer":          s.issuer.URL,
 			"audience":        c.Audience(),
-			"subject_pattern": "pravaha:env:" + e.Name + ":stack:*",
+			"subject_pattern": "pravaha:entity:" + e.Entity + ":env:" + e.Name + ":stack:*",
 		}
 	}
 	writeJSON(w, 200, resp)
@@ -126,44 +127,44 @@ func (s *Server) createEnvironment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := user(r)
-	if !p.CanManageEnvironments(b.BU) {
-		forbidden(w, p.CanView(b.BU) || b.BU == "", "managing environments needs tenant_admin, or admin of the business unit")
+	if !p.CanManageEnvironments(b.Entity) {
+		forbidden(w, p.CanViewEntity(b.Entity) || b.Entity == "", "managing environments needs tenant_admin, or admin of the entity")
 		return
 	}
 	if probs := b.validate(true); len(probs) > 0 {
 		writeErr(w, 422, "invalid environment", probs...)
 		return
 	}
-	if !p.KnownBU(b.BU) {
-		writeErr(w, 422, "unknown business unit "+b.BU)
+	if !s.knownEntity(r, b.Entity) {
+		writeErr(w, 422, "unknown entity "+b.Entity)
 		return
 	}
-	connID, ok := s.connectionFor(w, r, b.Connection, b.BU)
+	connID, ok := s.connectionFor(w, r, b.Connection, b.Entity)
 	if !ok {
 		return
 	}
-	e, err := s.store.CreateEnvironment(r.Context(), &store.Environment{Name: b.Name, BU: b.BU, Entity: p.EntityOf(b.BU), Tier: b.Tier, ConnectionID: connID,
+	e, err := s.store.CreateEnvironment(r.Context(), &store.Environment{Name: b.Name, Entity: b.Entity, Tier: b.Tier, ConnectionID: connID,
 		RunnerPool: b.RunnerPool, MaxDestroys: *b.MaxDestroys, AllowDestroy: b.AllowDestroy, CreatedBy: p.Subject})
 	if err != nil {
-		s.writeStoreErr(w, err, "an environment with that name exists")
+		s.writeStoreErr(w, err, "the entity already has an environment with that name")
 		return
 	}
-	s.audit(r.Context(), p.Actor(), "environment.create", "environment/"+e.Name, e.BU, e)
+	s.audit(r.Context(), p.Actor(), "environment.create", "environment/"+e.Entity+"/"+e.Name, "", e)
 	writeJSON(w, 201, e)
 }
 
 func (s *Server) updateEnvironment(w http.ResponseWriter, r *http.Request) {
 	p := user(r)
 	cur, err := s.store.GetEnvironment(r.Context(), r.PathValue("id"))
-	if err == nil && !p.CanView(cur.BU) {
+	if err == nil && !p.CanViewEntity(cur.Entity) {
 		err = store.ErrNotFound
 	}
 	if err != nil {
 		s.writeStoreErr(w, err, "")
 		return
 	}
-	if !p.CanManageEnvironments(cur.BU) {
-		writeErr(w, http.StatusForbidden, "managing environments needs tenant_admin, or admin of the business unit")
+	if !p.CanManageEnvironments(cur.Entity) {
+		writeErr(w, http.StatusForbidden, "managing environments needs tenant_admin, or admin of the entity")
 		return
 	}
 	var b envBody
@@ -174,7 +175,7 @@ func (s *Server) updateEnvironment(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 422, "invalid environment", probs...)
 		return
 	}
-	connID, ok := s.connectionFor(w, r, b.Connection, cur.BU)
+	connID, ok := s.connectionFor(w, r, b.Connection, cur.Entity)
 	if !ok {
 		return
 	}
@@ -183,7 +184,7 @@ func (s *Server) updateEnvironment(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreErr(w, err, "")
 		return
 	}
-	s.audit(r.Context(), p.Actor(), "environment.update", "environment/"+e.Name, e.BU, map[string]any{"before": cur, "after": e})
+	s.audit(r.Context(), p.Actor(), "environment.update", "environment/"+e.Entity+"/"+e.Name, "", map[string]any{"before": cur, "after": e})
 	writeJSON(w, 200, e)
 }
 
@@ -191,22 +192,22 @@ func (s *Server) updateEnvironment(w http.ResponseWriter, r *http.Request) {
 func (s *Server) deleteEnvironment(w http.ResponseWriter, r *http.Request) {
 	p := user(r)
 	cur, err := s.store.GetEnvironment(r.Context(), r.PathValue("id"))
-	if err == nil && !p.CanView(cur.BU) {
+	if err == nil && !p.CanViewEntity(cur.Entity) {
 		err = store.ErrNotFound
 	}
 	if err != nil {
 		s.writeStoreErr(w, err, "")
 		return
 	}
-	if !p.CanManageEnvironments(cur.BU) {
-		writeErr(w, http.StatusForbidden, "managing environments needs tenant_admin, or admin of the business unit")
+	if !p.CanManageEnvironments(cur.Entity) {
+		writeErr(w, http.StatusForbidden, "managing environments needs tenant_admin, or admin of the entity")
 		return
 	}
 	if err := s.store.DeleteEnvironment(r.Context(), cur.ID); err != nil {
 		s.writeStoreErr(w, err, "the environment still has stacks")
 		return
 	}
-	s.audit(r.Context(), p.Actor(), "environment.delete", "environment/"+cur.Name, cur.BU, cur)
+	s.audit(r.Context(), p.Actor(), "environment.delete", "environment/"+cur.Entity+"/"+cur.Name, "", cur)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -214,12 +215,13 @@ func (s *Server) deleteEnvironment(w http.ResponseWriter, r *http.Request) {
 
 type stackBody struct {
 	Name        string          `json:"name"`
-	Environment string          `json:"environment"`
+	BU          string          `json:"bu"`          // the business unit that owns the stack
+	Environment string          `json:"environment"` // an environment of the BU's entity
 	Spec        json.RawMessage `json:"spec"`
 }
 
 // build validates a spec for an environment and generates its configuration.
-func (s *Server) build(ctx context.Context, stackName string, env *store.Environment, raw []byte) (*spec.Generated, *spec.Cloud, []string) {
+func (s *Server) build(ctx context.Context, stackName, bu string, env *store.Environment, raw []byte) (*spec.Generated, *spec.Cloud, []string) {
 	c, err := spec.DecodeCloud(env.Cloud)
 	if err != nil {
 		return nil, nil, []string{"environment cloud integration is invalid: " + err.Error()}
@@ -230,7 +232,7 @@ func (s *Server) build(ctx context.Context, stackName string, env *store.Environ
 	}
 	gen, err := st.Generate(s.catalog, spec.GenerateInput{
 		StackName: stackName, Environment: env.Name, Cloud: c, TofuVersion: s.cfg.TofuVersion,
-		Tenant: s.cfg.Tenant, Entity: env.Entity, BU: env.BU,
+		Tenant: s.cfg.Tenant, Entity: env.Entity, BU: bu,
 	})
 	if err != nil {
 		return nil, nil, errLines(err)
@@ -249,13 +251,38 @@ func normalizeSpec(raw []byte) []byte {
 }
 
 // visibleEnv loads an environment the caller can see, or answers 422.
-func (s *Server) visibleEnv(w http.ResponseWriter, r *http.Request, name string) *store.Environment {
-	env, err := s.store.GetEnvironment(r.Context(), name)
-	if err != nil || !user(r).CanView(env.BU) {
-		writeErr(w, 422, "unknown environment")
-		return nil
+// target resolves where a stack goes: its business unit and an environment of
+// that BU's entity. Without a bu, the caller's only writable BU in the
+// environment's entity is used.
+func (s *Server) target(w http.ResponseWriter, r *http.Request, bu, envName string) (string, *store.Environment) {
+	p := user(r)
+	if bu == "" {
+		env, err := s.store.GetEnvironment(r.Context(), envName)
+		if err != nil || !p.CanViewEntity(env.Entity) {
+			writeErr(w, 422, "unknown environment "+envName+" (name the business unit with \"bu\")")
+			return "", nil
+		}
+		if bus := p.WritableBUs(env.Entity); len(bus) == 1 {
+			return bus[0], env
+		}
+		writeErr(w, 422, "bu is required: environment "+env.Name+" is shared by the business units of "+env.Entity)
+		return "", nil
 	}
-	return env
+	if !p.KnownBU(bu) || !p.CanView(bu) {
+		writeErr(w, 422, "unknown business unit "+bu)
+		return "", nil
+	}
+	entity := p.EntityOf(bu)
+	ref := envName
+	if !strings.Contains(ref, ":") {
+		ref = entity + ":" + envName
+	}
+	env, err := s.store.GetEnvironment(r.Context(), ref)
+	if err != nil || env.Entity != entity {
+		writeErr(w, 422, "unknown environment "+envName+" in entity "+entity)
+		return "", nil
+	}
+	return bu, env
 }
 
 func (s *Server) previewStack(w http.ResponseWriter, r *http.Request) {
@@ -263,7 +290,7 @@ func (s *Server) previewStack(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &b) {
 		return
 	}
-	env := s.visibleEnv(w, r, b.Environment)
+	bu, env := s.target(w, r, b.BU, b.Environment)
 	if env == nil {
 		return
 	}
@@ -271,7 +298,7 @@ func (s *Server) previewStack(w http.ResponseWriter, r *http.Request) {
 	if !spec.StackNameRe.MatchString(name) {
 		name = "preview"
 	}
-	gen, _, probs := s.build(r.Context(), name, env, b.Spec)
+	gen, _, probs := s.build(r.Context(), name, bu, env, b.Spec)
 	if probs != nil {
 		writeJSON(w, 200, map[string]any{"valid": false, "problems": probs})
 		return
@@ -283,7 +310,8 @@ func (s *Server) previewStack(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"valid": true, "files": files, "providers": gen.Providers, "modules": gen.Modules, "hash": gen.Hash})
 }
 
-// createStack: the stack belongs to its environment's business unit.
+// createStack: the stack belongs to a business unit and deploys to an
+// environment of that BU's entity.
 func (s *Server) createStack(w http.ResponseWriter, r *http.Request) {
 	var b stackBody
 	if !decode(w, r, &b) {
@@ -294,19 +322,19 @@ func (s *Server) createStack(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 422, "name must start with a letter and use lowercase letters, digits and dashes (2-63)")
 		return
 	}
-	env := s.visibleEnv(w, r, b.Environment)
+	bu, env := s.target(w, r, b.BU, b.Environment)
 	if env == nil {
 		return
 	}
-	if !p.CanChange(env.BU) {
-		writeErr(w, http.StatusForbidden, "creating stacks needs the developer or admin role in "+env.BU)
+	if !p.CanChange(bu) {
+		writeErr(w, http.StatusForbidden, "creating stacks needs the developer or admin role in "+bu)
 		return
 	}
-	if _, _, probs := s.build(r.Context(), b.Name, env, b.Spec); probs != nil {
+	if _, _, probs := s.build(r.Context(), b.Name, bu, env, b.Spec); probs != nil {
 		writeErr(w, 422, "stack spec rejected", probs...)
 		return
 	}
-	st, err := s.store.CreateStack(r.Context(), b.Name, env.BU, env.Entity, env.ID, normalizeSpec(b.Spec), p.Subject)
+	st, err := s.store.CreateStack(r.Context(), b.Name, bu, env.Entity, env.ID, normalizeSpec(b.Spec), p.Subject)
 	if err != nil {
 		s.writeStoreErr(w, err, "a stack with that name exists")
 		return
@@ -353,7 +381,7 @@ func (s *Server) updateStack(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreErr(w, err, "")
 		return
 	}
-	if _, _, probs := s.build(r.Context(), st.Name, env, b.Spec); probs != nil {
+	if _, _, probs := s.build(r.Context(), st.Name, st.BU, env, b.Spec); probs != nil {
 		writeErr(w, 422, "stack spec rejected", probs...)
 		return
 	}
@@ -458,7 +486,7 @@ func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusForbidden, "destroy runs are disabled for environment "+env.Name)
 		return
 	}
-	gen, _, probs := s.build(r.Context(), st.Name, env, st.Spec)
+	gen, _, probs := s.build(r.Context(), st.Name, st.BU, env, st.Spec)
 	if probs != nil {
 		writeErr(w, 422, "stack no longer validates against the catalog", probs...)
 		return
@@ -570,7 +598,7 @@ func (s *Server) approveRun(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreErr(w, err, "")
 		return
 	}
-	gen, _, probs := s.build(r.Context(), st.Name, env, st.Spec)
+	gen, _, probs := s.build(r.Context(), st.Name, st.BU, env, st.Spec)
 	_, serial, serr := s.store.CurrentState(r.Context(), st.ID)
 	stale := ""
 	switch {
@@ -745,4 +773,16 @@ func deref(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+// knownEntity: the entity exists in this tenant (central lists every BU with its entity).
+func (s *Server) knownEntity(r *http.Request, entity string) bool {
+	p := user(r)
+	for _, e := range p.BUEntity {
+		if e == entity {
+			return true
+		}
+	}
+	_, ok := p.EntityRoles[entity]
+	return ok
 }

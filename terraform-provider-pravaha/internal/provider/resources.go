@@ -400,7 +400,7 @@ type envRes struct{ base }
 type envModel struct {
 	ID           types.String `tfsdk:"id"`
 	Name         types.String `tfsdk:"name"`
-	BU           types.String `tfsdk:"bu"`
+	Entity       types.String `tfsdk:"entity"`
 	Tier         types.String `tfsdk:"tier"`
 	Connection   types.String `tfsdk:"cloud_connection"`
 	RunnerPool   types.String `tfsdk:"runner_pool"`
@@ -416,11 +416,11 @@ func (r *envRes) Metadata(_ context.Context, req resource.MetadataRequest, resp 
 
 func (r *envRes) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		Description: "An environment binds a business unit to a cloud connection and a tier. It can be deleted only when it has no stacks.",
+		Description: "An environment of an entity (product), shared by all of its business units: a cloud connection, a tier, a runner pool and guardrails. Names are unique within the entity. It can be deleted only when it has no stacks.",
 		Attributes: map[string]schema.Attribute{
 			"id":               idAttr(),
 			"name":             schema.StringAttribute{Required: true, PlanModifiers: replace()},
-			"bu":               schema.StringAttribute{Required: true, PlanModifiers: replace(), Description: "Business unit slug."},
+			"entity":           schema.StringAttribute{Required: true, PlanModifiers: replace(), Description: "Entity (product) slug; every business unit of the entity can deploy here."},
 			"tier":             schema.StringAttribute{Required: true, Description: "prod or nonprod."},
 			"cloud_connection": schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString(""), Description: "Cloud connection name. Empty means no cloud."},
 			"runner_pool":      schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString("default")},
@@ -432,7 +432,7 @@ func (r *envRes) Schema(_ context.Context, _ resource.SchemaRequest, resp *resou
 
 func (r *envRes) save(ctx context.Context, m *envModel, d *diag.Diagnostics, create bool) {
 	md := m.MaxDestroys.ValueInt64()
-	body := Environment{Name: m.Name.ValueString(), BU: m.BU.ValueString(), Tier: m.Tier.ValueString(), Connection: m.Connection.ValueString(),
+	body := Environment{Name: m.Name.ValueString(), Entity: m.Entity.ValueString(), Tier: m.Tier.ValueString(), Connection: m.Connection.ValueString(),
 		RunnerPool: m.RunnerPool.ValueString(), MaxDestroys: &md, AllowDestroy: m.AllowDestroy.ValueBool()}
 	var out Environment
 	var err error
@@ -486,7 +486,7 @@ func (r *envRes) Read(ctx context.Context, req resource.ReadRequest, resp *resou
 		return
 	}
 	e := out.Environment
-	m.ID, m.Name, m.BU, m.Tier = types.StringValue(e.ID), types.StringValue(e.Name), types.StringValue(e.BU), types.StringValue(e.Tier)
+	m.ID, m.Name, m.Entity, m.Tier = types.StringValue(e.ID), types.StringValue(e.Name), types.StringValue(e.Entity), types.StringValue(e.Tier)
 	m.Connection, m.RunnerPool, m.AllowDestroy = types.StringValue(e.Connection), types.StringValue(e.RunnerPool), types.BoolValue(e.AllowDestroy)
 	if e.MaxDestroys != nil {
 		m.MaxDestroys = types.Int64Value(*e.MaxDestroys)
@@ -503,7 +503,7 @@ func (r *envRes) Delete(ctx context.Context, req resource.DeleteRequest, resp *r
 }
 
 func (r *envRes) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp) // the environment name works too
+	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp) // "entity:name" works too
 }
 
 // ---- pravaha_policy_set ----

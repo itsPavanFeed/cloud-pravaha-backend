@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -187,12 +188,12 @@ func (s *Store) ConnectionPage(ctx context.Context, provider string, limit, offs
 
 // ---- environments ----
 
-// Environment is a deployment target inside a BU: a cloud connection (or none)
-// plus a tier and guardrails. Cloud is read from the connection.
+// Environment is a deployment target of an entity (product), shared by all of
+// its business units: a cloud connection (or none) plus a tier and guardrails.
+// Cloud is read from the connection. Names are unique within the entity.
 type Environment struct {
 	ID           string          `json:"id"`
 	Name         string          `json:"name"`
-	BU           string          `json:"bu"`
 	Entity       string          `json:"entity"`
 	Tier         string          `json:"tier"`
 	ConnectionID *string         `json:"connection_id,omitempty"`
@@ -206,20 +207,20 @@ type Environment struct {
 	UpdatedAt    time.Time       `json:"updated_at"`
 }
 
-const envSelect = `SELECT e.id, e.name, e.bu, e.entity, e.tier, e.connection_id, COALESCE(c.name, ''),
+const envSelect = `SELECT e.id, e.name, e.entity, e.tier, e.connection_id, COALESCE(c.name, ''),
 	COALESCE(c.cloud, '{"provider":"none"}'::jsonb), e.runner_pool, e.max_destroys, e.allow_destroy, e.created_by, e.created_at, e.updated_at
 	FROM environments e LEFT JOIN cloud_connections c ON c.id = e.connection_id`
 
 func scanEnv(r pgx.Row) (*Environment, error) {
 	var e Environment
-	err := r.Scan(&e.ID, &e.Name, &e.BU, &e.Entity, &e.Tier, &e.ConnectionID, &e.Connection, &e.Cloud, &e.RunnerPool, &e.MaxDestroys, &e.AllowDestroy, &e.CreatedBy, &e.CreatedAt, &e.UpdatedAt)
+	err := r.Scan(&e.ID, &e.Name, &e.Entity, &e.Tier, &e.ConnectionID, &e.Connection, &e.Cloud, &e.RunnerPool, &e.MaxDestroys, &e.AllowDestroy, &e.CreatedBy, &e.CreatedAt, &e.UpdatedAt)
 	return &e, NotFound(err)
 }
 
 func (s *Store) CreateEnvironment(ctx context.Context, e *Environment) (*Environment, error) {
 	var id string
-	err := s.db.QueryRow(ctx, `INSERT INTO environments (name, bu, entity, tier, connection_id, runner_pool, max_destroys, allow_destroy, created_by)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`, e.Name, e.BU, e.Entity, e.Tier, e.ConnectionID, e.RunnerPool, e.MaxDestroys, e.AllowDestroy, e.CreatedBy).Scan(&id)
+	err := s.db.QueryRow(ctx, `INSERT INTO environments (name, entity, tier, connection_id, runner_pool, max_destroys, allow_destroy, created_by)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`, e.Name, e.Entity, e.Tier, e.ConnectionID, e.RunnerPool, e.MaxDestroys, e.AllowDestroy, e.CreatedBy).Scan(&id)
 	if IsUnique(err) {
 		return nil, ErrConflict
 	}
@@ -241,13 +242,35 @@ func (s *Store) UpdateEnvironment(ctx context.Context, e *Environment) (*Environ
 	return s.GetEnvironment(ctx, e.ID)
 }
 
-func (s *Store) GetEnvironment(ctx context.Context, idOrName string) (*Environment, error) {
-	return scanEnv(s.db.QueryRow(ctx, envSelect+` WHERE e.id::text = $1 OR e.name = $1`, idOrName))
+// GetEnvironment finds an environment by ID, by "entity:name", or by a bare
+// name when exactly one entity has an environment of that name.
+func (s *Store) GetEnvironment(ctx context.Context, ref string) (*Environment, error) {
+	if entity, name, ok := strings.Cut(ref, ":"); ok {
+		return s.EntityEnvironment(ctx, entity, name)
+	}
+	rows, err := s.db.Query(ctx, envSelect+` WHERE e.id::text = $1 OR e.name = $1 LIMIT 2`, ref)
+	if err != nil {
+		return nil, err
+	}
+	es, err := Collect(rows, scanEnv)
+	if err != nil {
+		return nil, err
+	}
+	if len(es) != 1 {
+		return nil, ErrNotFound // unknown, or ambiguous without the entity
+	}
+	return es[0], nil
 }
 
-func (s *Store) ListEnvironments(ctx context.Context, bus []string) ([]*Environment, error) {
+// EntityEnvironment finds an entity's environment by name.
+func (s *Store) EntityEnvironment(ctx context.Context, entity, name string) (*Environment, error) {
+	return scanEnv(s.db.QueryRow(ctx, envSelect+` WHERE e.entity = $1 AND e.name = $2`, entity, name))
+}
+
+// ListEnvironments lists the environments of the given entities (nil = all).
+func (s *Store) ListEnvironments(ctx context.Context, entities []string) ([]*Environment, error) {
 	args := []any{}
-	rows, err := s.db.Query(ctx, envSelect+` WHERE `+buFilter("e.bu", bus, &args)+` ORDER BY e.entity, e.bu, e.name`, args...)
+	rows, err := s.db.Query(ctx, envSelect+` WHERE `+buFilter("e.entity", entities, &args)+` ORDER BY e.entity, e.name`, args...)
 	if err != nil {
 		return nil, err
 	}

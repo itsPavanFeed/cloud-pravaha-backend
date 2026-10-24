@@ -13,7 +13,7 @@ func TestSignVerify(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now()
-	tok, err := iss.Sign(Claims{Subject: Subject("prod", "network", "apply"), Audience: "sts.amazonaws.com", TTL: time.Hour}, now)
+	tok, err := iss.Sign(Claims{Subject: Subject("retail", "prod", "network", "apply"), Audience: "sts.amazonaws.com", TTL: time.Hour}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -21,7 +21,7 @@ func TestSignVerify(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c["sub"] != "pravaha:env:prod:stack:network:phase:apply" || c["iss"] != "https://pravaha.example.com" || c["aud"] != "sts.amazonaws.com" {
+	if c["sub"] != "pravaha:entity:retail:env:prod:stack:network:phase:apply" || c["iss"] != "https://pravaha.example.com" || c["aud"] != "sts.amazonaws.com" {
 		t.Fatalf("claims: %v", c)
 	}
 	if _, err := iss.Verify(tok, now.Add(2*time.Hour)); err == nil {

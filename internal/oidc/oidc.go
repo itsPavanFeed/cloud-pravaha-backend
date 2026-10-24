@@ -55,6 +55,7 @@ func New(url string, pkcs8 []byte) (*Issuer, error) {
 type Claims struct {
 	Subject     string
 	Audience    string
+	Entity      string
 	Environment string
 	Stack       string
 	RunID       string
@@ -62,9 +63,10 @@ type Claims struct {
 	TTL         time.Duration
 }
 
-// Subject is the "sub" claim cloud trust policies match on.
-func Subject(env, stack, phase string) string {
-	return "pravaha:env:" + env + ":stack:" + stack + ":phase:" + phase
+// Subject is the "sub" claim cloud trust policies match on. Environment names
+// are unique within an entity, so the entity is part of it.
+func Subject(entity, env, stack, phase string) string {
+	return "pravaha:entity:" + entity + ":env:" + env + ":stack:" + stack + ":phase:" + phase
 }
 
 func (i *Issuer) Sign(c Claims, now time.Time) (string, error) {
@@ -81,6 +83,7 @@ func (i *Issuer) Sign(c Claims, now time.Time) (string, error) {
 		"nbf":         now.Add(-30 * time.Second).Unix(),
 		"exp":         now.Add(c.TTL).Unix(),
 		"jti":         b64(jti),
+		"entity":      c.Entity,
 		"environment": c.Environment,
 		"stack":       c.Stack,
 		"run_id":      c.RunID,

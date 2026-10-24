@@ -145,7 +145,7 @@ func (s *Server) testPolicy(w http.ResponseWriter, r *http.Request) {
 		}
 		var sum policy.Summary
 		json.Unmarshal(run.PlanSummary, &sum)
-		env, _ := s.store.GetEnvironment(r.Context(), run.Environment)
+		env, _ := s.store.EntityEnvironment(r.Context(), run.Entity, run.Environment)
 		input = s.policyInput(run, env, sum)
 	}
 	writeJSON(w, 200, opapolicy.Evaluate(r.Context(), []opapolicy.Set{{Name: "test", Level: "hard", Module: b.Module}}, input))

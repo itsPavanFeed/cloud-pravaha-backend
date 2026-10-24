@@ -125,9 +125,69 @@ func (p *Principal) CanChange(bu string) bool {
 	return p.PlatformAdmin || p.HasBURole(bu, Admin, Developer)
 }
 
-// CanManageEnvironments: a BU's environments.
-func (p *Principal) CanManageEnvironments(bu string) bool {
-	return p.HasTenantRole(TenantAdmin) || p.HasBURole(bu, Admin)
+// CanManageEnvironments: an entity's environments, which all of its business
+// units share — tenant admins or admins of the entity.
+func (p *Principal) CanManageEnvironments(entity string) bool {
+	if p.HasTenantRole(TenantAdmin) {
+		return true
+	}
+	for _, r := range p.EntityRoles[entity] {
+		if r == Admin {
+			return true
+		}
+	}
+	return false
+}
+
+// VisibleEntities returns the entities p can see environments of (those of its
+// visible business units), or nil meaning "all".
+func (p *Principal) VisibleEntities() []string {
+	bus := p.VisibleBUs()
+	if bus == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	out := []string{}
+	for _, bu := range bus {
+		if e := p.BUEntity[bu]; e != "" && !seen[e] {
+			seen[e] = true
+			out = append(out, e)
+		}
+	}
+	for e, rs := range p.EntityRoles {
+		if len(rs) > 0 && !seen[e] {
+			seen[e] = true
+			out = append(out, e)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// CanViewEntity: p sees at least one business unit of the entity.
+func (p *Principal) CanViewEntity(entity string) bool {
+	vs := p.VisibleEntities()
+	if vs == nil {
+		return true
+	}
+	for _, e := range vs {
+		if e == entity {
+			return true
+		}
+	}
+	return false
+}
+
+// WritableBUs lists the entity's business units p may create stacks in.
+func (p *Principal) WritableBUs(entity string) []string {
+	out := []string{}
+	for bu, e := range p.BUEntity {
+		if e == entity && p.CanChange(bu) {
+			out = append(out, bu)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Actor is how audit records name the caller; platform admins are marked so
