@@ -140,12 +140,23 @@ func SecurityHeaders(hsts bool, next http.Handler) http.Handler {
 func SPA(dir string) http.Handler {
 	fs := http.FileServer(http.Dir(dir))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		p := filepath.Join(dir, filepath.Clean("/"+r.URL.Path))
-		if st, err := os.Stat(p); err != nil || st.IsDir() {
+		clean := filepath.Clean("/" + r.URL.Path)
+		p := filepath.Join(dir, clean)
+		st, err := os.Stat(p)
+		switch {
+		case strings.HasPrefix(clean, "/assets/") && (err != nil || st.IsDir()):
+			// A missing build file (e.g. a chunk of an older release) is a 404,
+			// never the app's HTML, so the browser can tell and reload.
+			http.NotFound(w, r)
+		case err != nil || st.IsDir():
+			w.Header().Set("Cache-Control", "no-cache") // always pick up a new release
 			http.ServeFile(w, r, filepath.Join(dir, "index.html"))
-			return
+		case strings.HasPrefix(clean, "/assets/"):
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable") // fingerprinted file names
+			fs.ServeHTTP(w, r)
+		default:
+			fs.ServeHTTP(w, r)
 		}
-		fs.ServeHTTP(w, r)
 	})
 }
 
