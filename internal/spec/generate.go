@@ -52,14 +52,27 @@ func (s *Stack) Generate(cat *catalog.Catalog, in GenerateInput) (*Generated, er
 		for k, v := range cm.Enforced {
 			block[k] = v
 		}
+		into := map[string]map[string]any{}
 		for k, raw := range m.Inputs {
+			var val any = json.RawMessage(raw)
 			v, _ := decodeAny(raw)
 			if ref, ok, _ := asRef(v); ok {
 				p := refRe.FindStringSubmatch(ref)
-				block[k] = fmt.Sprintf("${module.%s.%s}", p[1], p[2])
+				val = fmt.Sprintf("${module.%s.%s}", p[1], p[2])
+			}
+			if in := cm.Input(k); in != nil && in.Into != "" {
+				obj := into[in.Into]
+				if obj == nil {
+					obj = map[string]any{}
+					for ek, ev := range cm.Enforced[in.Into].(map[string]any) {
+						obj[ek] = ev
+					}
+					into[in.Into], block[in.Into] = obj, obj
+				}
+				obj[k] = val
 				continue
 			}
-			block[k] = json.RawMessage(raw)
+			block[k] = val
 		}
 		modules[m.Name] = block
 		sources = append(sources, cm.Source)
@@ -217,6 +230,22 @@ func providerConfig(in GenerateInput, used map[string]catalog.Provider, files ma
 			}
 			out["azapi"] = p
 		}
+	}
+	if c.Provider == "azure" && has("hashicorp/azurerm") {
+		p := map[string]any{ // client_id comes from ARM_CLIENT_ID per phase
+			"features":                        []any{map[string]any{}},
+			"tenant_id":                       c.Azure.TenantID,
+			"subscription_id":                 c.Azure.SubscriptionID,
+			"use_cli":                         false,
+			"resource_provider_registrations": "none",
+		}
+		if c.Auth == "oidc" {
+			p["use_oidc"] = true
+			p["oidc_token_file_path"] = TokenFile
+		} else {
+			p["use_msi"] = true
+		}
+		out["azurerm"] = p
 	}
 	// Microsoft's module telemetry provider is always switched off.
 	if has("azure/modtm") {

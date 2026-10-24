@@ -223,3 +223,46 @@ func TestImports(t *testing.T) {
 		}
 	}
 }
+
+func TestInputIntoEnforcedObject(t *testing.T) {
+	c, err := catalog.New([]*catalog.Module{
+		{ID: "gcp-sql", Source: "terraform-google-modules/sql-db/google//modules/postgresql", Versions: []string{"28.3.0"}, Cloud: "gcp", Providers: []string{"hashicorp/google"},
+			Inputs:   []*catalog.Input{{Name: "private_network", Type: "string", Required: true, Into: "ip_configuration", Pattern: "^projects/[a-z0-9-]+/global/networks/[a-z0-9-]+$"}},
+			Enforced: map[string]any{"ip_configuration": map[string]any{"ipv4_enabled": false}}},
+	}, []catalog.Provider{{Source: "hashicorp/google", Version: "8.8.0", Cloud: "gcp"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := mustDecode(t, `{"modules":[{"name":"db","module":"gcp-sql","inputs":{"private_network":"projects/p-12345/global/networks/n"}}]}`)
+	gen, err := st.Generate(c, GenerateInput{StackName: "s", Environment: "e", Cloud: &Cloud{Provider: "gcp", GCP: &GCPCloud{ProjectID: "p-12345", Region: "europe-west1", ServiceAccountEmail: "a@p-12345.iam.gserviceaccount.com"}}, TofuVersion: "1.13.2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg struct {
+		Module map[string]map[string]json.RawMessage `json:"module"`
+	}
+	json.Unmarshal(gen.Files["main.tf.json"], &cfg)
+	db := cfg.Module["db"]
+	if _, top := db["private_network"]; top {
+		t.Fatal("into input must not be a top-level module argument")
+	}
+	var ip map[string]any
+	json.Unmarshal(db["ip_configuration"], &ip)
+	if ip["ipv4_enabled"] != false || ip["private_network"] != "projects/p-12345/global/networks/n" {
+		t.Fatalf("ip_configuration = %v", ip)
+	}
+	if !strings.HasSuffix(string(db["source"]), `//modules/postgresql"`) {
+		t.Fatalf("source = %s", db["source"])
+	}
+	if !c.ModuleVersionAllowed("terraform-google-modules/sql-db/google", "28.3.0") {
+		t.Fatal("the package address of a submodule entry should be allowed")
+	}
+	// The enforced object cannot be overridden through an into input either.
+	_, err = catalog.New([]*catalog.Module{{ID: "x", Source: "a/b/google", Versions: []string{"1.0.0"}, Cloud: "gcp", Providers: []string{"hashicorp/google"},
+		Inputs:   []*catalog.Input{{Name: "ipv4_enabled", Type: "bool", Into: "ip_configuration"}},
+		Enforced: map[string]any{"ip_configuration": map[string]any{"ipv4_enabled": false}}}},
+		[]catalog.Provider{{Source: "hashicorp/google", Version: "8.8.0", Cloud: "gcp"}})
+	if err == nil || !strings.Contains(err.Error(), "override") {
+		t.Fatalf("want override error, got %v", err)
+	}
+}

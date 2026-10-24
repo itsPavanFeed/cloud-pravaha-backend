@@ -20,8 +20,9 @@ import (
 const Registry = "registry.opentofu.org"
 
 var (
-	idRe      = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,62}$`)
-	sourceRe  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}/[A-Za-z0-9][A-Za-z0-9_-]{0,63}/[a-z0-9]{1,32}$`)
+	idRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,62}$`)
+	// namespace/name/provider, optionally //modules/<sub> for a registry package's submodule
+	sourceRe  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}/[A-Za-z0-9][A-Za-z0-9_-]{0,63}/[a-z0-9]{1,32}(//modules/[a-z0-9_-]{1,64})?$`)
 	provRe    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}/[a-z0-9][a-z0-9-]{0,63}$`)
 	semverRe  = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
 	inputRe   = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]{0,63}$`)
@@ -55,6 +56,9 @@ type Input struct {
 	Min         *float64 `json:"min,omitempty"`
 	Max         *float64 `json:"max,omitempty"`
 	MaxItems    int      `json:"max_items,omitempty"`
+	// Into places the value as a key inside an enforced object instead of as a
+	// module argument, so a baseline can lock an object's other keys.
+	Into string `json:"into,omitempty"`
 
 	pattern     *regexp.Regexp
 	itemPattern *regexp.Regexp
@@ -104,6 +108,14 @@ type Catalog struct {
 
 func (c *Catalog) Module(id string) *Module { return c.byID[id] }
 
+// BaseSource strips a //modules/<sub> suffix: the registry package address.
+func BaseSource(src string) string {
+	if i := strings.Index(src, "//"); i >= 0 {
+		return src[:i]
+	}
+	return src
+}
+
 func (c *Catalog) ModuleBySource(src string) *Module { return c.bySource[strings.ToLower(src)] }
 
 func (c *Catalog) Provider(src string) (Provider, bool) {
@@ -116,8 +128,13 @@ func (c *Catalog) Provider(src string) (Provider, bool) {
 // declared dependency of one.
 func (c *Catalog) ModuleVersionAllowed(source, version string) bool {
 	source = strings.TrimPrefix(strings.ToLower(source), Registry+"/")
-	if m := c.bySource[source]; m != nil && m.HasVersion(version) {
-		return true
+	if i := strings.Index(source, "//"); i >= 0 {
+		source = source[:i]
+	}
+	for _, m := range c.Modules {
+		if strings.EqualFold(BaseSource(m.Source), source) && m.HasVersion(version) {
+			return true
+		}
 	}
 	for _, m := range c.Modules {
 		for _, d := range m.Dependencies {
@@ -307,6 +324,14 @@ func (c *Catalog) index() error {
 			}
 			if _, enforced := m.Enforced[in.Name]; enforced {
 				errs = append(errs, fmt.Errorf("%s: input %q is both user-settable and enforced", where, in.Name))
+			}
+			if in.Into != "" {
+				obj, ok := m.Enforced[in.Into].(map[string]any)
+				if !ok {
+					errs = append(errs, fmt.Errorf("%s: input %q goes into %q, which is not an enforced object", where, in.Name, in.Into))
+				} else if _, locked := obj[in.Name]; locked {
+					errs = append(errs, fmt.Errorf("%s: input %q would override the enforced %s.%s", where, in.Name, in.Into, in.Name))
+				}
 			}
 			seen[in.Name] = true
 			var err error

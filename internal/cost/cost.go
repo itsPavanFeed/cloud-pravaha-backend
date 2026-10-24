@@ -39,10 +39,13 @@ var sized = map[string]map[string]float64{
 	"aws_instance": {
 		"t3.nano": 0.0052, "t3.micro": 0.0104, "t3.small": 0.0208, "t3.medium": 0.0416, "t3.large": 0.0832, "t3.xlarge": 0.1664,
 		"m5.large": 0.096, "m5.xlarge": 0.192, "m5.2xlarge": 0.384, "c5.large": 0.085, "c5.xlarge": 0.17, "r5.large": 0.126,
+		"t4g.micro": 0.0084, "t4g.small": 0.0168, "t4g.medium": 0.0336, "m7i.large": 0.1008, "m7i.xlarge": 0.2016,
+		"m7g.large": 0.0816, "m7g.xlarge": 0.1632, "c7i.large": 0.0893, "r7i.large": 0.1323,
 	},
 	"aws_db_instance": {
 		"db.t3.micro": 0.017, "db.t3.small": 0.034, "db.t3.medium": 0.068, "db.t3.large": 0.136,
 		"db.m5.large": 0.171, "db.m5.xlarge": 0.342, "db.r5.large": 0.24,
+		"db.t4g.micro": 0.016, "db.t4g.small": 0.032, "db.t4g.medium": 0.065, "db.m7g.large": 0.168, "db.m7g.xlarge": 0.336, "db.r7g.large": 0.239,
 	},
 	"google_compute_instance": {
 		"e2-micro": 0.0084, "e2-small": 0.0168, "e2-medium": 0.0335, "e2-standard-2": 0.067, "e2-standard-4": 0.134,

@@ -79,14 +79,21 @@ func Check(workdir string, cat *catalog.Catalog) error {
 		switch {
 		case strings.HasPrefix(m.Source, catalog.Registry+"/"):
 			addr := strings.TrimPrefix(m.Source, catalog.Registry+"/")
-			if strings.Contains(addr, "//") {
-				addr = addr[:strings.Index(addr, "//")] // registry package subdirectory
+			pkg := dir
+			if i := strings.Index(addr, "//"); i >= 0 {
+				// A submodule of a registry package: the package root is the boundary
+				// for its local references (siblings like ../../modules/x are fine).
+				sub := filepath.FromSlash(addr[i+2:])
+				addr = addr[:i]
+				if strings.HasSuffix(dir, string(filepath.Separator)+sub) {
+					pkg = strings.TrimSuffix(dir, string(filepath.Separator)+sub)
+				}
 			}
 			if !cat.ModuleVersionAllowed(addr, m.Version) {
 				add("module %s: %s@%s is not an approved registry module version", m.Key, addr, m.Version)
 				continue
 			}
-			packages[m.Key] = dir
+			packages[m.Key] = pkg
 		case strings.HasPrefix(m.Source, "./") || strings.HasPrefix(m.Source, "../"):
 			pkg := owningPackage(m.Key, packages)
 			if pkg == "" || !within(dir, pkg) {

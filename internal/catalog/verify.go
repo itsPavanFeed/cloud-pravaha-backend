@@ -28,7 +28,7 @@ func (c *Catalog) VerifyOnline(ctx context.Context) error {
 		}
 	}
 	for _, m := range c.Modules {
-		check("module "+m.Source, base+"/modules/"+m.Source+"/versions", m.Versions, moduleVersions)
+		check("module "+m.Source, base+"/modules/"+BaseSource(m.Source)+"/versions", m.Versions, moduleVersions)
 		for _, d := range m.Dependencies {
 			check("dependency "+d.Source, base+"/modules/"+d.Source+"/versions", d.Versions, moduleVersions)
 		}
