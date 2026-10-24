@@ -89,6 +89,40 @@ A drift run (`{"operation":"drift"}`) is a refresh-only plan. It compares real i
 
 Each stack can schedule checks (`PUT /stacks/{id}/drift` with `{"interval_minutes": 60, "auto_remediate": true}`; minimum 5 minutes). With auto-remediation, a drifted check queues a normal plan, which still goes through the risk-based approval chain.
 
+## Assistant (LLM with RAG)
+
+The assistant answers questions about the platform and drafts stacks. It is off by default. To enable it on a tenant plane, give it an Anthropic API key: `PRAVAHA_ASSISTANT_API_KEY`, or `PRAVAHA_ASSISTANT_API_KEY_FILE`.
+
+- **Retrieval.** A BM25 index runs inside the tenant plane, so no embedding service is needed. It covers:
+  - the approved catalog: each module's inputs, constraints, enforced baseline and outputs;
+  - a built-in platform guide;
+  - Markdown runbooks from `PRAVAHA_ASSISTANT_DOCS_DIR`;
+  - the tenant's OPA policies and risk policy;
+  - the stacks and environments the caller can see.
+
+  The index is rebuilt per question from the caller's view, so it never retrieves another BU's stacks.
+- **Model.** Claude (`claude-opus-5-5` by default, effort `medium`) through the official Go SDK. It has two tools:
+  - `search_knowledge` retrieves more passages;
+  - `propose_stack` validates a draft against the catalog and an environment the caller can write to, using the same code as `stacks/preview`. The draft is returned only once it is valid.
+
+  Answers cite passages as `[catalog:aws-eks]`.
+- **No side effects.** The assistant never creates, plans or applies anything. A draft opens in the stack editor, and the person submits it through the normal RBAC, risk and approval chain.
+- **Data and audit.** A question sends the question and the retrieved passages to the Anthropic API, or to a gateway set with `PRAVAHA_ASSISTANT_BASE_URL`. Each question is audited as `assistant.ask` with a hash and the token counts, never the text. Questions are limited to 60 per user per hour.
+
+`POST /api/v1/t/{t}/assistant/ask` with `{"question", "history": [{"role","text"}]}` streams newline-delimited JSON: `status` events, then one `answer` with `text`, `sources`, `draft` and `usage`.
+
+## Configuration as code (OpenTofu/Terraform provider)
+
+[`terraform-provider-pravaha/`](terraform-provider-pravaha/README.md) manages a tenant's configuration from OpenTofu or Terraform:
+- entities and business units
+- role grants
+- cloud connections
+- environments
+- OPA policy sets
+- the risk policy
+
+It also has a catalog data source. Stacks are not provider resources. They stay in the contracts repository or the console, so infrastructure changes always go through plans and approvals.
+
 ## How a change flows
 
 1. **Spec.** A developer submits a stack spec listing catalog modules, literal inputs and `{"$ref": "module.output"}` wiring. Anything outside the catalog, version ranges, `${…}`/`%{…}` templates and unknown fields are rejected.
@@ -189,6 +223,10 @@ SCIM 2.0 lives at `<central>/scim/v2`; create its bearer token with `pravaha cen
 | `PRAVAHA_BUCKET_URL` | Optional tenant bucket for state versions and saved plans: `s3://bucket[/prefix]?endpoint=https://…&region=…` (AWS S3, MinIO, Ceph, SeaweedFS, GCS interoperability). The database then keeps only keys and checksums |
 | `PRAVAHA_TEMPORAL_ADDRESS`, `PRAVAHA_TEMPORAL_NAMESPACE` | Optional Temporal frontend (`host:7233`) and namespace. With it, each run is a durable workflow `run-<id>` that owns its timers (planning silence, approval expiry, apply timeout), and drift checks come from a cron workflow on task queue `pravaha-<tenant>`. Without it, the built-in database reaper and scheduler do the same |
 | `PRAVAHA_BUCKET_ACCESS_KEY`, `PRAVAHA_BUCKET_SECRET_KEY` | Bucket credentials (use `_FILE` variants); `PRAVAHA_BUCKET_CREATE=1` creates the bucket on start |
+| `PRAVAHA_ASSISTANT_API_KEY` | Optional Anthropic API key (use `_FILE`). Setting it enables the assistant |
+| `PRAVAHA_ASSISTANT_MODEL`, `PRAVAHA_ASSISTANT_EFFORT` | Model (default `claude-opus-5-5`) and effort (`low`…`max`, default `medium`) |
+| `PRAVAHA_ASSISTANT_BASE_URL` | Optional API gateway (https; plain http only on loopback). Server-side refusal fallbacks are used only against the Anthropic API directly; `PRAVAHA_ASSISTANT_FALLBACKS=0` turns them off |
+| `PRAVAHA_ASSISTANT_DOCS_DIR` | Directory of extra Markdown files (runbooks, conventions) to index |
 
 **Runner:** `PRAVAHA_SERVER_URL` (its tenant plane), `PRAVAHA_RUNNER_TOKEN`, `PRAVAHA_STATE_KEY` (32+ characters, shared by the pool, never seen by any plane), `PRAVAHA_CA_FILE`, `PRAVAHA_CATALOG_DIR` (pins the catalog locally), `PRAVAHA_PLUGIN_CACHE_DIR`, `PRAVAHA_WORK_DIR`.
 
@@ -217,12 +255,13 @@ pravaha dev-cert -dir certs -name tenant -host pravaha.acme.internal [-client]
 
 Tenant plane API (reached as `/api/v1/t/{t}/…`):
 - `catalog`
-- `connections` (tenant admins register; everyone reads)
-- `environments` (`{"name","bu","tier","connection",…}`)
+- `connections` (tenant admins register and delete unused ones; everyone reads)
+- `environments` (`{"name","bu","tier","connection",…}`; DELETE only without stacks)
 - `stacks` (and `stacks/preview`, `stacks/{id}/runs`, `stacks/{id}/state-versions`)
 - `runs/{id}`, `runs/{id}/logs`, `runs/{id}/approve` with `{"step": "manager"|"finops"|"security", "reason"}`, and `runs/{id}/discard`
 - `audit`, `audit/verify`
 - `runners`
+- `assistant`, `assistant/ask`
 
 Every handler checks the caller's role for the resource's entity.
 
@@ -230,7 +269,7 @@ Every handler checks the caller's role for the resource's entity.
 
 ```bash
 go test ./...                                         # unit tests: catalog layout, spec attacks, depcheck, assertions, risk, roles, ...
-../cloud-pravaha-test-resources/e2e/run.sh            # 116 end-to-end checks: two tenants, real registry modules
+../cloud-pravaha-test-resources/e2e/run.sh            # 190+ end-to-end checks: two tenants, real registry modules
 ../cloud-pravaha-test-resources/e2e/compose-smoke.sh  # the Docker Compose install
 ```
 
@@ -241,4 +280,3 @@ See [SECURITY.md](SECURITY.md) for the security controls and how they map to com
 This build covers the tenancy core of the platform design. Coming next:
 - Pull-request plans: speculative plans posted back to Git pull requests
 - Resource discovery for backporting (listing a cloud account's resources to suggest imports)
-- LLM integration with RAG

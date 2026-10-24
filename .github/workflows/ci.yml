@@ -16,6 +16,9 @@ jobs:
       - run: go test -race ./...
       - run: go build -trimpath -o bin/pravaha ./cmd/pravaha
       - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      - name: terraform-provider-pravaha
+        working-directory: terraform-provider-pravaha
+        run: go mod verify && go vet ./... && go test ./... && go build -trimpath -o ../bin/terraform-provider-pravaha .
   e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 30

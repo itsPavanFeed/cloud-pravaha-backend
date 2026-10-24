@@ -37,4 +37,6 @@ helm install acme ./cloud-pravaha-tenant -n cloud-pravaha \
   --set runner.serviceAccountAnnotations."eks\.amazonaws\.com/role-arn"=arn:aws:iam::123456789012:role/pravaha-runner
 ```
 
+To enable the assistant, add `assistant-api-key` to the tenant Secret and set `assistant.enabled=true`. It sends questions and the retrieved passages to the Anthropic API, or to `assistant.baseURL` if set. The tenant pod then needs outbound HTTPS to that host.
+
 Network policies let only central's namespace (`central.ingressFrom`) and the release's runners reach the tenant API. Runners accept no inbound traffic.
