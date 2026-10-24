@@ -1,0 +1,27 @@
+{{- if .Values.tls.certManager.enabled }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "central.name" . }}-server
+spec:
+  secretName: {{ .Values.tls.secretName }}
+  issuerRef: {{- toYaml .Values.tls.certManager.issuerRef | nindent 4 }}
+  dnsNames: {{- toYaml .Values.tls.certManager.dnsNames | nindent 4 }}
+  privateKey: { algorithm: ECDSA, size: 256, rotationPolicy: Always }
+  duration: 2160h
+  renewBefore: 360h
+---
+# Central's client identity towards tenant planes; usages restricts it to client auth.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "central.name" . }}-client
+spec:
+  secretName: {{ .Values.tls.clientSecretName }}
+  issuerRef: {{- toYaml .Values.tls.certManager.issuerRef | nindent 4 }}
+  commonName: cloud-pravaha-central
+  usages: [client auth, digital signature]
+  privateKey: { algorithm: ECDSA, size: 256, rotationPolicy: Always }
+  duration: 2160h
+  renewBefore: 360h
+{{- end }}

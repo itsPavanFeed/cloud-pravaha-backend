@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/certs"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/config"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/httpx"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/identity"
@@ -45,7 +46,7 @@ type Server struct {
 	cfg     *config.Central
 	store   *Store
 	issuer  *oidc.Issuer
-	cert    tls.Certificate
+	cert    *certs.KeyPair // mTLS client identity, reloaded when rotated
 	log     *slog.Logger
 	limiter *httpx.Limiter
 
@@ -60,7 +61,7 @@ type tenantTransport struct {
 }
 
 func New(cfg *config.Central, st *Store, iss *oidc.Issuer, log *slog.Logger) (*Server, error) {
-	cert, err := tls.LoadX509KeyPair(cfg.ClientCert, cfg.ClientKey)
+	cert, err := certs.NewKeyPair(cfg.ClientCert, cfg.ClientKey)
 	if err != nil {
 		return nil, fmt.Errorf("loading mTLS client certificate: %w", err)
 	}
@@ -131,12 +132,16 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) Run(ctx context.Context) error {
 	var tlsCfg *tls.Config
 	if !s.cfg.InsecureHTTP {
-		tlsCfg = &tls.Config{MinVersion: tls.VersionTLS12}
+		kp, err := certs.NewKeyPair(s.cfg.TLSCert, s.cfg.TLSKey)
+		if err != nil {
+			return fmt.Errorf("TLS certificate: %w", err)
+		}
+		tlsCfg = certs.ServerConfig(kp, nil)
 	} else {
 		s.log.Warn("central serving plain HTTP on loopback for local development only", "listen", s.cfg.Listen)
 	}
 	s.log.Info("central plane serving", "listen", s.cfg.Listen, "public_url", s.cfg.PublicURL)
-	return httpx.Serve(ctx, s.log, s.cfg.Listen, s.Handler(), tlsCfg, s.cfg.TLSCert, s.cfg.TLSKey)
+	return httpx.Serve(ctx, s.log, s.cfg.Listen, s.Handler(), tlsCfg, "", "")
 }
 
 // ---- auth ----
@@ -709,7 +714,7 @@ func (s *Server) transport(t *Tenant) (http.RoundTripper, error) {
 	if tt := s.transports[t.Slug]; tt != nil && tt.key == key {
 		return tt.rt, nil
 	}
-	tc := &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{s.cert}}
+	tc := &tls.Config{MinVersion: tls.VersionTLS12, GetClientCertificate: s.cert.GetClientCertificate}
 	if t.ServerCAPEM != "" {
 		pool := x509.NewCertPool()
 		if !pool.AppendCertsFromPEM([]byte(t.ServerCAPEM)) {

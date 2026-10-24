@@ -1,0 +1,60 @@
+image:
+  server: ghcr.io/itspavanfeed/cloud-pravaha-server
+  runner: ghcr.io/itspavanfeed/cloud-pravaha-runner
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+# The tenant slug, exactly as onboarded in the central plane.
+tenant: acme
+# URL runners and clouds reach this tenant plane at. It is the OIDC issuer the tenant's clouds trust.
+publicURL: https://pravaha.acme.internal
+
+central:
+  url: https://pravaha.example.com     # where to fetch central's signing keys
+  issuer: ""                           # if central signs with a different URL than url
+  # Secret with ca.crt: the CA that issued central's client certificate (only it may call the user API).
+  clientCASecret: cloud-pravaha-central-client-ca
+  # Namespaces/pods allowed to reach the tenant API (central's network). Used by the NetworkPolicy.
+  ingressFrom:
+    - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: cloud-pravaha-central } }
+
+# Existing Secret with keys: database-url, master-key. Optional: bucket-access-key, bucket-secret-key.
+existingSecret: cloud-pravaha-tenant
+
+tls:
+  secretName: cloud-pravaha-tenant-tls
+  certManager:
+    enabled: false
+    issuerRef: { kind: ClusterIssuer, name: cloud-pravaha-ca }
+    dnsNames: [pravaha.acme.internal]
+
+bucket:
+  url: ""        # s3://bucket[/prefix]?endpoint=https://...&region=...
+
+temporal:
+  address: ""    # e.g. temporal-frontend.temporal:7233
+  namespace: default
+
+replicas: 2
+
+runner:
+  enabled: true
+  replicas: 2
+  pool: default
+  # Existing Secret with keys: runner-token (pvh_r_...), state-key (32+ chars, shared by the pool).
+  existingSecret: cloud-pravaha-runner
+  # Annotations for the runner's ServiceAccount: workload identity for "ambient" connections, e.g.
+  # eks.amazonaws.com/role-arn, iam.gke.io/gcp-service-account, azure.workload.identity/client-id.
+  serviceAccountAnnotations: {}
+  podLabels: {}
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits: { memory: 4Gi }
+  tmpSize: 4Gi
+
+resources:
+  requests: { cpu: 100m, memory: 128Mi }
+  limits: { memory: 512Mi }
+
+networkPolicy:
+  enabled: true

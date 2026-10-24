@@ -141,6 +141,10 @@ Then complete the setup:
 - `server` (central and tenant): distroless, non-root, read-only, about 14 MB.
 - `runner`: Alpine with only `git` and CA certificates added, because registry modules download from commit-pinned git sources. It runs non-root.
 
+## Kubernetes
+
+Helm charts for the central plane and for a tenant plane with its runners are in [`deploy/helm`](deploy/helm). They support cert-manager, network policies and hardened pod security. TLS certificates, central's mTLS client certificate and the trusted client CA reload from disk when rotated, with no restart needed.
+
 ## Configuration
 
 Secrets can be given directly or as `NAME_FILE` pointing to a mounted secret.
@@ -238,4 +242,3 @@ This build covers the tenancy core of the platform design. Coming next:
 - Pull-request plans: speculative plans posted back to Git pull requests
 - Resource discovery for backporting (listing a cloud account's resources to suggest imports)
 - LLM integration with RAG
-- Helm charts

@@ -1,0 +1,15 @@
+{{- if .Values.tls.certManager.enabled }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "tenant.name" . }}
+spec:
+  secretName: {{ .Values.tls.secretName }}
+  issuerRef: {{- toYaml .Values.tls.certManager.issuerRef | nindent 4 }}
+  dnsNames:
+    {{- toYaml .Values.tls.certManager.dnsNames | nindent 4 }}
+    - {{ include "tenant.name" . }}
+  privateKey: { algorithm: ECDSA, size: 256, rotationPolicy: Always }
+  duration: 2160h
+  renewBefore: 360h
+{{- end }}

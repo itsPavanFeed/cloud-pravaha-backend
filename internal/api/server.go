@@ -23,6 +23,7 @@ import (
 
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/blob"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/catalog"
+	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/certs"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/config"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/httpx"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/identity"
@@ -141,15 +142,16 @@ func (s *Server) Handler() http.Handler {
 // Run serves HTTPS. Client certificates are optional at the TLS layer (runners
 // do not have one) and required by authUser for user requests.
 func (s *Server) Run(ctx context.Context) error {
-	pem, err := os.ReadFile(s.cfg.CentralClientCA)
+	// Certificates and the client CA reload from disk when rotated.
+	kp, err := certs.NewKeyPair(s.cfg.TLSCert, s.cfg.TLSKey)
+	if err != nil {
+		return fmt.Errorf("TLS certificate: %w", err)
+	}
+	pool, err := certs.NewPool(s.cfg.CentralClientCA)
 	if err != nil {
 		return fmt.Errorf("PRAVAHA_CENTRAL_CLIENT_CA: %w", err)
 	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(pem) {
-		return errors.New("PRAVAHA_CENTRAL_CLIENT_CA contains no certificates")
-	}
-	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12, ClientAuth: tls.VerifyClientCertIfGiven, ClientCAs: pool}
+	tlsCfg := certs.ServerConfig(kp, pool)
 	if s.cfg.TemporalAddress != "" {
 		t, err := orchestrator.NewTemporal(orchestrator.TemporalConfig{
 			Address: s.cfg.TemporalAddress, Namespace: s.cfg.TemporalNamespace,
@@ -172,7 +174,7 @@ func (s *Server) Run(ctx context.Context) error {
 	go s.reaper(ctx)
 	go s.contractsSyncer(ctx)
 	s.log.Info("tenant plane serving HTTPS", "tenant", s.cfg.Tenant, "listen", s.cfg.Listen, "central", s.cfg.CentralURL)
-	return httpx.Serve(ctx, s.log, s.cfg.Listen, s.Handler(), tlsCfg, s.cfg.TLSCert, s.cfg.TLSKey)
+	return httpx.Serve(ctx, s.log, s.cfg.Listen, s.Handler(), tlsCfg, "", "")
 }
 
 func (s *Server) reaper(ctx context.Context) {

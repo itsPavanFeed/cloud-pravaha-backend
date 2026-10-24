@@ -1,0 +1,6 @@
+apiVersion: v2
+name: cloud-pravaha-tenant
+description: Cloud Pravaha tenant plane (one client's backend, state and runs) and its OpenTofu runners
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

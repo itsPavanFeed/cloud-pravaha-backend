@@ -1,0 +1,28 @@
+{{- if .Values.networkPolicy.enabled }}
+# The tenant API accepts traffic only from central's network and this release's runners.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "tenant.name" . }}
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: cloud-pravaha-tenant, app.kubernetes.io/instance: {{ .Release.Name }} }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        {{- toYaml .Values.central.ingressFrom | nindent 8 }}
+        - podSelector:
+            matchLabels: { app.kubernetes.io/name: cloud-pravaha-runner, app.kubernetes.io/instance: {{ .Release.Name }} }
+      ports: [{ port: 9443, protocol: TCP }]
+---
+# Runners accept no inbound traffic; they only poll the tenant plane and reach cloud APIs.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-runner
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: cloud-pravaha-runner, app.kubernetes.io/instance: {{ .Release.Name }} }
+  policyTypes: [Ingress]
+  ingress: []
+{{- end }}

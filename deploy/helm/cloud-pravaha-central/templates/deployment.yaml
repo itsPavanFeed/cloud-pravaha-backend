@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "central.name" . }}
+  labels: {{- include "central.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels: {{- include "central.selector" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "central.selector" . | nindent 8 }}
+      annotations: {{- toYaml .Values.podAnnotations | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext: { runAsNonRoot: true, fsGroup: 65532, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: central
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["central"]
+          ports: [{ name: https, containerPort: 8443 }]
+          env:
+            - { name: PRAVAHA_LISTEN, value: ":8443" }
+            - { name: PRAVAHA_PUBLIC_URL, value: {{ .Values.publicURL | quote }} }
+            - { name: PRAVAHA_DATABASE_URL_FILE, value: /secrets/database-url }
+            - { name: PRAVAHA_MASTER_KEY_FILE, value: /secrets/master-key }
+            - { name: PRAVAHA_TLS_CERT, value: /tls/server/tls.crt }
+            - { name: PRAVAHA_TLS_KEY, value: /tls/server/tls.key }
+            - { name: PRAVAHA_CLIENT_CERT, value: /tls/client/tls.crt }
+            - { name: PRAVAHA_CLIENT_KEY, value: /tls/client/tls.key }
+            {{- with .Values.sso }}
+            {{- if .issuer }}
+            - { name: PRAVAHA_OIDC_ISSUER, value: {{ .issuer | quote }} }
+            - { name: PRAVAHA_OIDC_CLIENT_ID, value: {{ .clientID | quote }} }
+            - { name: PRAVAHA_OIDC_CLIENT_SECRET_FILE, value: /secrets/oidc-client-secret }
+            - { name: PRAVAHA_OIDC_ALLOWED_DOMAINS, value: {{ .allowedDomains | quote }} }
+            - { name: PRAVAHA_OIDC_LABEL, value: {{ .label | quote }} }
+            {{- if .trustUnverifiedEmail }}
+            - { name: PRAVAHA_OIDC_TRUST_UNVERIFIED_EMAIL, value: "1" }
+            {{- end }}
+            {{- end }}
+            {{- end }}
+          securityContext: {{- include "pravaha.securityContext" . | nindent 12 }}
+          readinessProbe: { httpGet: { path: /healthz, port: https, scheme: HTTPS }, periodSeconds: 10 }
+          livenessProbe: { httpGet: { path: /healthz, port: https, scheme: HTTPS }, periodSeconds: 20 }
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - { name: secrets, mountPath: /secrets, readOnly: true }
+            - { name: server-tls, mountPath: /tls/server, readOnly: true }
+            - { name: client-tls, mountPath: /tls/client, readOnly: true }
+      volumes:
+        - name: secrets
+          secret: { secretName: {{ .Values.existingSecret }}, defaultMode: 0400 }
+        - name: server-tls
+          secret: { secretName: {{ .Values.tls.secretName }}, defaultMode: 0400 }
+        - name: client-tls
+          secret: { secretName: {{ .Values.tls.clientSecretName }}, defaultMode: 0400 }
+      nodeSelector: {{- toYaml .Values.nodeSelector | nindent 8 }}
+      tolerations: {{- toYaml .Values.tolerations | nindent 8 }}
+      affinity: {{- toYaml .Values.affinity | nindent 8 }}

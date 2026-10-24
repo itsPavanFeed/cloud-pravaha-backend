@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "tenant.name" . }}
+  labels: {{- include "tenant.labels" . | nindent 4 }}
+    app.kubernetes.io/name: cloud-pravaha-tenant
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels: { app.kubernetes.io/name: cloud-pravaha-tenant, app.kubernetes.io/instance: {{ .Release.Name }} }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: cloud-pravaha-tenant, app.kubernetes.io/instance: {{ .Release.Name }} }
+    spec:
+      automountServiceAccountToken: false
+      securityContext: { runAsNonRoot: true, fsGroup: 65532, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: tenant
+          image: "{{ .Values.image.server }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["tenant"]
+          ports: [{ name: https, containerPort: 9443 }]
+          env:
+            - { name: PRAVAHA_TENANT, value: {{ .Values.tenant | quote }} }
+            - { name: PRAVAHA_LISTEN, value: ":9443" }
+            - { name: PRAVAHA_PUBLIC_URL, value: {{ .Values.publicURL | quote }} }
+            - { name: PRAVAHA_DATABASE_URL_FILE, value: /secrets/database-url }
+            - { name: PRAVAHA_MASTER_KEY_FILE, value: /secrets/master-key }
+            - { name: PRAVAHA_TLS_CERT, value: /tls/tls.crt }
+            - { name: PRAVAHA_TLS_KEY, value: /tls/tls.key }
+            - { name: PRAVAHA_CENTRAL_URL, value: {{ .Values.central.url | quote }} }
+            {{- with .Values.central.issuer }}
+            - { name: PRAVAHA_CENTRAL_ISSUER, value: {{ . | quote }} }
+            {{- end }}
+            - { name: PRAVAHA_CENTRAL_CLIENT_CA, value: /central-ca/ca.crt }
+            {{- with .Values.bucket.url }}
+            - { name: PRAVAHA_BUCKET_URL, value: {{ . | quote }} }
+            - { name: PRAVAHA_BUCKET_ACCESS_KEY_FILE, value: /secrets/bucket-access-key }
+            - { name: PRAVAHA_BUCKET_SECRET_KEY_FILE, value: /secrets/bucket-secret-key }
+            {{- end }}
+            {{- with .Values.temporal.address }}
+            - { name: PRAVAHA_TEMPORAL_ADDRESS, value: {{ . | quote }} }
+            - { name: PRAVAHA_TEMPORAL_NAMESPACE, value: {{ $.Values.temporal.namespace | quote }} }
+            {{- end }}
+          securityContext: {{- include "pravaha.securityContext" . | nindent 12 }}
+          readinessProbe: { httpGet: { path: /healthz, port: https, scheme: HTTPS }, periodSeconds: 10 }
+          livenessProbe: { httpGet: { path: /healthz, port: https, scheme: HTTPS }, periodSeconds: 20 }
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - { name: secrets, mountPath: /secrets, readOnly: true }
+            - { name: tls, mountPath: /tls, readOnly: true }
+            - { name: central-ca, mountPath: /central-ca, readOnly: true }
+      volumes:
+        - name: secrets
+          secret: { secretName: {{ .Values.existingSecret }}, defaultMode: 0400 }
+        - name: tls
+          secret: { secretName: {{ .Values.tls.secretName }}, defaultMode: 0400 }
+        - name: central-ca
+          secret: { secretName: {{ .Values.central.clientCASecret }}, defaultMode: 0444 }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "tenant.name" . }}
+  labels: {{- include "tenant.labels" . | nindent 4 }}
+spec:
+  selector: { app.kubernetes.io/name: cloud-pravaha-tenant, app.kubernetes.io/instance: {{ .Release.Name }} }
+  ports: [{ name: https, port: 443, targetPort: https }]
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "tenant.name" . }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: cloud-pravaha-tenant, app.kubernetes.io/instance: {{ .Release.Name }} }
