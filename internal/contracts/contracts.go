@@ -67,8 +67,8 @@ func (c *Config) Validate(allowLocal bool) error {
 			errs = append(errs, errors.New("repo must look like owner/name"))
 		}
 		if c.APIURL != "" {
-			if u, err := url.Parse(c.APIURL); err != nil || u.Scheme != "https" || u.Host == "" {
-				errs = append(errs, errors.New("api_url must be an https URL"))
+			if u, err := url.Parse(c.APIURL); err != nil || u.Host == "" || !(u.Scheme == "https" || u.Scheme == "http" && isLoopback(u.Hostname())) {
+				errs = append(errs, errors.New("api_url must be an https URL (plain http only on loopback, for development)"))
 			}
 		}
 	case "local":
@@ -413,3 +413,5 @@ func untar(r io.Reader) (map[string][]byte, error) {
 		files[rel] = b
 	}
 }
+
+func isLoopback(h string) bool { return h == "localhost" || h == "127.0.0.1" || h == "::1" }

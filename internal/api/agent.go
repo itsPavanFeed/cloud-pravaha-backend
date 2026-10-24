@@ -5,8 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/catalog"
@@ -105,7 +108,7 @@ func (s *Server) startJob(w http.ResponseWriter, r *http.Request, run *store.Run
 		fail("environment not found")
 		return
 	}
-	gen, cloud, probs := s.build(ctx, st.Name, st.BU, env, st.Spec)
+	gen, cloud, probs := s.build(ctx, st.Name, st.BU, env, runSpec(st, run))
 	if probs != nil {
 		fail("stack no longer validates: " + probs[0])
 		return
@@ -246,8 +249,37 @@ func (s *Server) agentPlan(w http.ResponseWriter, r *http.Request) {
 		"risk": rk.Level, "required_approvals": rk.Steps, "monthly_cost_delta_usd": est.MonthlyDelta,
 	})
 	s.engine.Planned(ctx, run.ID, status == "planned")
+	if status == "planned" && run.PRNumber != nil {
+		// The pull request may have been closed, or got new commits, while this
+		// plan was being made: such a plan must never be approved.
+		if pr, err := s.store.GetPR(ctx, *run.PRNumber); err == nil && (pr.State != "open" || pr.HeadSHA != deref(run.PRSha)) {
+			if moved, _ := s.store.Expire(ctx, run.ID, []string{"planned"}, "discarded", "the pull request was closed or has newer commits"); moved {
+				s.engine.Finished(ctx, run.ID)
+				status = "discarded"
+			}
+		}
+	}
 	if status == "planned" {
 		s.autoApplyLowRisk(ctx, run, rk)
+	}
+	if cur, err := s.store.GetRun(ctx, run.ID); err == nil {
+		changes := fmt.Sprintf("+%d ~%d -%d (replace %d), %s risk, cost %+.2f USD/month", up.Summary.Add, up.Summary.Change, up.Summary.Destroy, up.Summary.Replace, rk.Level, est.MonthlyDelta)
+		switch {
+		case status == "policy_failed":
+			s.notifyRun(ctx, cur, "run.policy_failed", "error", "Blocked by policy: "+cur.StackName, fmt.Sprintf("%d violation(s). %s", len(res.Violations), changes), nil)
+		case status == "no_changes":
+			s.notifyRun(ctx, cur, "run.no_changes", "info", "No changes: "+cur.StackName, "The plan matches the deployed infrastructure.", nil)
+		case cur.Status == "discarded":
+			// superseded pull-request plan: nothing to announce
+		case cur.Status == "apply_queued":
+			s.notifyRun(ctx, cur, "run.auto_approved", "info", "Auto-approved (low risk): "+cur.StackName, changes, nil)
+		default:
+			s.notifyRun(ctx, cur, "run.awaiting_approval", "action", fmt.Sprintf("Approval needed: %s in %s", cur.StackName, cur.Environment),
+				changes+". Needs "+strings.Join(rk.Steps, ", ")+".", rk.Steps)
+		}
+	}
+	if status == "no_changes" {
+		s.adoptPRSpec(ctx, run) // nothing to deploy: the pull request's spec already matches reality
 	}
 	writeJSON(w, 200, map[string]any{"status": status, "risk": rk.Level, "required_approvals": rk.Steps})
 }
@@ -273,6 +305,9 @@ func (s *Server) recordDrift(w http.ResponseWriter, r *http.Request, run *store.
 		drifted = append(drifted, d.Address)
 	}
 	s.audit(ctx, who(r).Subject(), "run.drift", "run/"+run.ID, run.BU, map[string]any{"stack": st.Name, "status": status, "resources": drifted})
+	if status == "drifted" {
+		s.notifyRun(ctx, run, "drift.detected", "warning", "Drift detected: "+st.Name, fmt.Sprintf("%d resource(s) changed outside OpenTofu: %s", len(drifted), strings.Join(firstN(drifted, 5), ", ")), nil)
+	}
 	if status == "drifted" && st.Drift.AutoRemediate {
 		if env, err := s.store.GetEnvironment(ctx, st.EnvironmentID); err == nil {
 			if gen, _, probs := s.build(ctx, st.Name, st.BU, env, st.Spec); probs == nil {
@@ -409,6 +444,12 @@ func (s *Server) agentFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.engine.Finished(r.Context(), run.ID)
+	if b.Status == "applied" {
+		s.adoptPRSpec(r.Context(), run)
+		s.notifyRun(r.Context(), run, "run.applied", "success", "Applied: "+run.StackName, "Applied in "+run.Environment+".", nil)
+	} else {
+		s.notifyRun(r.Context(), run, "run.failed", "error", "Failed: "+run.StackName, serverRedactor.String(firstLine(b.Error)), nil)
+	}
 	s.cleanupPlans(context.WithoutCancel(r.Context()))
 	s.audit(r.Context(), who(r).Subject(), "run."+b.Status, "run/"+run.ID, run.BU, map[string]string{"stack": run.StackName, "error": b.Error})
 	w.WriteHeader(http.StatusNoContent)
@@ -524,4 +565,39 @@ func (s *Server) state(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Allow", "GET, POST, LOCK, UNLOCK")
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
+}
+
+// adoptPRSpec makes a pull-request run's spec the stack's once it is deployed
+// (applied, or planned with no changes), so the contracts sync after the merge
+// finds nothing to change.
+func (s *Server) adoptPRSpec(ctx context.Context, run *store.Run) {
+	if len(run.Spec) == 0 {
+		return
+	}
+	n := 0
+	if run.PRNumber != nil {
+		n = *run.PRNumber
+	}
+	ref := "pr#" + strconv.Itoa(n) + "@" + short(deref(run.PRSha))
+	if err := s.store.AdoptPRSpec(ctx, run.StackID, run.Spec, ref); err != nil {
+		s.log.Error("recording the pull request spec failed", "run", run.ID, "err", err)
+	}
+}
+
+func firstN(xs []string, n int) []string {
+	if len(xs) > n {
+		return append(xs[:n:n], fmt.Sprintf("and %d more", len(xs)-n))
+	}
+	return xs
+}
+
+func firstLine(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	if len(s) > 300 {
+		s = s[:300] + "…"
+	}
+	return s
 }

@@ -48,6 +48,7 @@ runner:
   enabled: true
   replicas: 2
   pool: default
+  concurrency: 2   # runs per runner at once, each in its own work and temp directories
   # Existing Secret with keys: runner-token (pvh_r_...), state-key (32+ chars, shared by the pool).
   existingSecret: cloud-pravaha-runner
   # Annotations for the runner's ServiceAccount: workload identity for "ambient" connections, e.g.

@@ -175,6 +175,9 @@ func (s *Server) syncContracts(ctx context.Context, force bool) (*SyncStatus, er
 	s.store.Setting(ctx, contractsStatusKey, &prev)
 	var err error
 	fail := func(err error) (*SyncStatus, error) {
+		if prev.Error != err.Error() { // once per new problem, not on every poll
+			s.notifyEvent(ctx, store.Notification{Kind: "contracts.sync_failed", Severity: "error", Title: "Contracts sync failed", Body: err.Error(), Link: "settings/contracts"})
+		}
 		st := SyncStatus{Revision: prev.Revision, SyncedAt: time.Now(), Error: err.Error(), Results: prev.Results}
 		s.store.PutSetting(ctx, contractsStatusKey, st, "system:contracts")
 		return nil, err
@@ -266,7 +269,7 @@ func (s *Server) applyContract(ctx context.Context, cfg *contracts.Config, c con
 		return errOut("a stack with this name exists and is managed in the UI")
 	case existing.EnvironmentID != env.ID || existing.BU != c.BU:
 		return errOut("a stack cannot move to another environment or business unit; use a new name")
-	case sameJSON(existing.Spec, spec):
+	case sameJSON(existing.Spec, spec) && existing.PRNumber == nil:
 		res.Action = "unchanged"
 		return res
 	default:

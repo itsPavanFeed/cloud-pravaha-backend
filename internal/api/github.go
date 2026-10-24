@@ -159,8 +159,8 @@ func (s *Server) putGitHubIntegration(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if b.APIURL != "" {
-		if u, err := url.Parse(b.APIURL); err != nil || u.Scheme != "https" || u.Host == "" {
-			probs = append(probs, "api_url must be an https URL (GitHub Enterprise Server: https://HOST/api/v3)")
+		if u, err := url.Parse(b.APIURL); err != nil || u.Host == "" || !(u.Scheme == "https" || u.Scheme == "http" && (u.Hostname() == "127.0.0.1" || u.Hostname() == "localhost")) {
+			probs = append(probs, "api_url must be an https URL (GitHub Enterprise Server: https://HOST/api/v3; plain http only on loopback)")
 		}
 	}
 	keySet := len(s.ghState().Key) > 0
@@ -463,7 +463,7 @@ func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "missing X-GitHub-Event or X-GitHub-Delivery")
 		return
 	}
-	d.Outcome, d.Detail = s.handleGitHubEvent(r.Context(), d, ev.Hook.AppID, ev.Installation.ID, ev.PullRequest.Number)
+	d.Outcome, d.Detail = s.handleGitHubEvent(r.Context(), d, ev.Hook.AppID, ev.Installation.ID, ev.PullRequest.Number, body)
 	if err := s.store.RecordDelivery(r.Context(), d); errors.Is(err, store.ErrConflict) {
 		writeJSON(w, 200, map[string]string{"outcome": "duplicate", "detail": "this delivery was already processed"})
 		return
@@ -473,7 +473,7 @@ func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 202, map[string]string{"outcome": d.Outcome, "detail": d.Detail})
 }
 
-func (s *Server) handleGitHubEvent(ctx context.Context, d *store.WebhookDelivery, hookAppID, installationID int64, pr int) (string, string) {
+func (s *Server) handleGitHubEvent(ctx context.Context, d *store.WebhookDelivery, hookAppID, installationID int64, pr int, body []byte) (string, string) {
 	cfg, appOK := s.githubAppConfig(ctx)
 	switch d.Event {
 	case "ping":
@@ -496,9 +496,6 @@ func (s *Server) handleGitHubEvent(ctx context.Context, d *store.WebhookDelivery
 		if d.Ref != "refs/heads/"+cc.Branch {
 			return "ignored", "push to " + d.Ref + ", contracts follow " + cc.Branch
 		}
-		if !cc.Enabled {
-			return "ignored", "contracts sync is disabled"
-		}
 		go func() {
 			sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
 			defer cancel()
@@ -507,11 +504,66 @@ func (s *Server) handleGitHubEvent(ctx context.Context, d *store.WebhookDelivery
 			}
 		}()
 		return "processed", "contracts sync started for " + cc.Branch
-	case "pull_request", "issue_comment", "pull_request_review":
-		if pr > 0 {
-			return "ignored", fmt.Sprintf("pull request #%d %s: pull-request plans are not enabled yet", pr, d.Action)
+	case "pull_request":
+		cc, ok := s.contractsConfig(ctx)
+		if !ok || cc.Provider != "github" || !strings.EqualFold(cc.Repo, d.Repo) {
+			return "ignored", "not the contracts repository"
 		}
-		return "ignored", "pull-request plans are not enabled yet"
+		var ev struct {
+			PullRequest struct {
+				Merged bool `json:"merged"`
+				Base   struct {
+					Ref string `json:"ref"`
+				} `json:"base"`
+			} `json:"pull_request"`
+		}
+		json.Unmarshal(body, &ev)
+		if ev.PullRequest.Base.Ref != cc.Branch {
+			return "ignored", "pull request targets " + ev.PullRequest.Base.Ref + ", contracts follow " + cc.Branch
+		}
+		switch d.Action {
+		case "opened", "synchronize", "reopened", "ready_for_review":
+			s.async(func(ctx context.Context) error { return s.planPR(ctx, pr) })
+			return "processed", fmt.Sprintf("planning pull request #%d", pr)
+		case "closed":
+			merged := ev.PullRequest.Merged
+			s.async(func(ctx context.Context) error { s.closePR(ctx, pr, merged); return nil })
+			return "processed", fmt.Sprintf("pull request #%d closed (merged: %v)", pr, merged)
+		}
+		return "ignored", fmt.Sprintf("pull request #%d %s", pr, d.Action)
+	case "issue_comment":
+		var ev struct {
+			Issue struct {
+				Number      int             `json:"number"`
+				PullRequest json.RawMessage `json:"pull_request"`
+			} `json:"issue"`
+			Comment struct {
+				Body string `json:"body"`
+			} `json:"comment"`
+		}
+		json.Unmarshal(body, &ev)
+		if d.Action != "created" || len(ev.Issue.PullRequest) == 0 || strings.TrimSpace(ev.Comment.Body) != "/plan" {
+			return "ignored", "not a /plan comment on a pull request"
+		}
+		if _, err := s.store.GetPR(ctx, ev.Issue.Number); err != nil {
+			return "ignored", "pull request is not tracked (it does not target the contracts branch)"
+		}
+		n := ev.Issue.Number
+		s.async(func(ctx context.Context) error { return s.planPR(ctx, n) })
+		return "processed", fmt.Sprintf("planning pull request #%d again (requested by %s)", n, d.Sender)
+	case "pull_request_review", "pull_request_review_comment", "pull_request_review_thread", "commit_comment":
+		return "ignored", "reviews do not change plans; approvals happen in Cloud Pravaha"
 	}
 	return "ignored", "event not used"
+}
+
+// async runs background work started by a webhook, detached from the request.
+func (s *Server) async(fn func(ctx context.Context) error) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		if err := fn(ctx); err != nil {
+			s.log.Warn("webhook follow-up failed", "err", err)
+		}
+	}()
 }

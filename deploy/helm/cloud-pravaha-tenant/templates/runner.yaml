@@ -34,6 +34,7 @@ spec:
             - { name: PRAVAHA_SERVER_URL, value: "https://{{ include "tenant.name" . }}" }
             - { name: PRAVAHA_RUNNER_TOKEN_FILE, value: /secrets/runner-token }
             - { name: PRAVAHA_STATE_KEY_FILE, value: /secrets/state-key }
+            - { name: PRAVAHA_RUNNER_CONCURRENCY, value: {{ .Values.runner.concurrency | quote }} }
             - { name: PRAVAHA_CA_FILE, value: /tls/ca.crt }
             - { name: PRAVAHA_RUNNER_NAME, valueFrom: { fieldRef: { fieldPath: metadata.name } } }
           securityContext: {{- include "pravaha.securityContext" . | nindent 12 }}

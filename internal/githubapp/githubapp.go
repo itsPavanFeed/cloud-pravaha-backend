@@ -7,6 +7,7 @@
 package githubapp
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/hmac"
@@ -112,9 +113,24 @@ func (a *App) api() string {
 }
 
 func (a *App) call(ctx context.Context, method, path, bearer string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, method, a.api()+path, nil)
+	return a.send(ctx, method, path, bearer, nil, out)
+}
+
+func (a *App) send(ctx context.Context, method, path, bearer string, body, out any) error {
+	var rd io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		rd = bytes.NewReader(b)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, a.api()+path, rd)
 	if err != nil {
 		return err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
 	req.Header.Set("Authorization", "Bearer "+bearer)
 	req.Header.Set("Accept", "application/vnd.github+json")
@@ -242,4 +258,136 @@ func (a *App) RepoAccess(ctx context.Context, installationID int64, repo string)
 	owner, name, _ := strings.Cut(repo, "/")
 	err = a.call(ctx, http.MethodGet, "/repos/"+url.PathEscape(owner)+"/"+url.PathEscape(name), tok, &r)
 	return r.DefaultBranch, r.Private, err
+}
+
+// ---- repository operations with an installation token ----
+
+func repoPath(repo string) string {
+	owner, name, _ := strings.Cut(repo, "/")
+	return "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(name)
+}
+
+// Do calls the API as the installation.
+func (a *App) Do(ctx context.Context, installationID int64, method, path string, body, out any) error {
+	tok, err := a.Token(ctx, installationID)
+	if err != nil {
+		return err
+	}
+	return a.send(ctx, method, path, tok, body, out)
+}
+
+// SetStatus sets a commit status (state: pending, success, failure, error).
+func (a *App) SetStatus(ctx context.Context, inst int64, repo, sha, state, context_, description, target string) error {
+	if len(description) > 140 {
+		description = description[:139] + "…"
+	}
+	body := map[string]string{"state": state, "context": context_, "description": description}
+	if target != "" {
+		body["target_url"] = target
+	}
+	return a.Do(ctx, inst, http.MethodPost, repoPath(repo)+"/statuses/"+url.PathEscape(sha), body, nil)
+}
+
+// Comment creates a pull request comment, or edits commentID when it is set.
+func (a *App) Comment(ctx context.Context, inst int64, repo string, pr int, commentID int64, body string) (int64, error) {
+	var out struct {
+		ID int64 `json:"id"`
+	}
+	if commentID != 0 {
+		err := a.Do(ctx, inst, http.MethodPatch, repoPath(repo)+"/issues/comments/"+strconv.FormatInt(commentID, 10), map[string]string{"body": body}, &out)
+		if e, ok := err.(*APIError); !ok || e.Status != http.StatusNotFound {
+			return commentID, err
+		}
+		// the comment was deleted: post a new one
+	}
+	err := a.Do(ctx, inst, http.MethodPost, repoPath(repo)+"/issues/"+strconv.Itoa(pr)+"/comments", map[string]string{"body": body}, &out)
+	return out.ID, err
+}
+
+// PR is the part of a pull request the platform uses.
+type PR struct {
+	Number  int    `json:"number"`
+	State   string `json:"state"`
+	Title   string `json:"title"`
+	HTMLURL string `json:"html_url"`
+	Draft   bool   `json:"draft"`
+	Merged  bool   `json:"merged"`
+	User    struct {
+		Login string `json:"login"`
+	} `json:"user"`
+	Head struct {
+		SHA  string `json:"sha"`
+		Ref  string `json:"ref"`
+		Repo struct {
+			FullName string `json:"full_name"`
+		} `json:"repo"`
+	} `json:"head"`
+	Base struct {
+		Ref  string `json:"ref"`
+		Repo struct {
+			FullName string `json:"full_name"`
+		} `json:"repo"`
+	} `json:"base"`
+}
+
+func (a *App) GetPR(ctx context.Context, inst int64, repo string, n int) (*PR, error) {
+	var p PR
+	return &p, a.Do(ctx, inst, http.MethodGet, repoPath(repo)+"/pulls/"+strconv.Itoa(n), nil, &p)
+}
+
+// Merge merges a pull request, only if its head is still sha.
+func (a *App) Merge(ctx context.Context, inst int64, repo string, n int, sha, title, message string) error {
+	return a.Do(ctx, inst, http.MethodPut, repoPath(repo)+"/pulls/"+strconv.Itoa(n)+"/merge",
+		map[string]string{"sha": sha, "merge_method": "squash", "commit_title": title, "commit_message": message}, nil)
+}
+
+// ---- self-service: branches, files and pull requests ----
+
+// BranchSHA returns the commit a branch points at.
+func (a *App) BranchSHA(ctx context.Context, inst int64, repo, branch string) (string, error) {
+	var out struct {
+		Object struct {
+			SHA string `json:"sha"`
+		} `json:"object"`
+	}
+	err := a.Do(ctx, inst, http.MethodGet, repoPath(repo)+"/git/ref/heads/"+branch, nil, &out)
+	return out.Object.SHA, err
+}
+
+func (a *App) CreateBranch(ctx context.Context, inst int64, repo, branch, sha string) error {
+	return a.Do(ctx, inst, http.MethodPost, repoPath(repo)+"/git/refs", map[string]string{"ref": "refs/heads/" + branch, "sha": sha}, nil)
+}
+
+// FileSHA returns a file's blob SHA on a branch ("" when it does not exist).
+func (a *App) FileSHA(ctx context.Context, inst int64, repo, path, branch string) (string, error) {
+	var out struct {
+		SHA string `json:"sha"`
+	}
+	err := a.Do(ctx, inst, http.MethodGet, repoPath(repo)+"/contents/"+escapePath(path)+"?ref="+url.QueryEscape(branch), nil, &out)
+	if e, ok := err.(*APIError); ok && e.Status == http.StatusNotFound {
+		return "", nil
+	}
+	return out.SHA, err
+}
+
+// PutFile creates or updates a file on a branch in one commit.
+func (a *App) PutFile(ctx context.Context, inst int64, repo, path, branch, message string, content []byte, sha string) error {
+	body := map[string]string{"message": message, "branch": branch, "content": base64.StdEncoding.EncodeToString(content)}
+	if sha != "" {
+		body["sha"] = sha
+	}
+	return a.Do(ctx, inst, http.MethodPut, repoPath(repo)+"/contents/"+escapePath(path), body, nil)
+}
+
+func (a *App) OpenPR(ctx context.Context, inst int64, repo, head, base, title, body string) (*PR, error) {
+	var p PR
+	return &p, a.Do(ctx, inst, http.MethodPost, repoPath(repo)+"/pulls", map[string]string{"head": head, "base": base, "title": title, "body": body}, &p)
+}
+
+func escapePath(p string) string {
+	parts := strings.Split(p, "/")
+	for i := range parts {
+		parts[i] = url.PathEscape(parts[i])
+	}
+	return strings.Join(parts, "/")
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -603,7 +604,7 @@ func (s *Server) approveRun(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreErr(w, err, "")
 		return
 	}
-	gen, _, probs := s.build(r.Context(), st.Name, st.BU, env, st.Spec)
+	gen, _, probs := s.build(r.Context(), st.Name, st.BU, env, runSpec(st, run))
 	_, serial, serr := s.store.CurrentState(r.Context(), st.ID)
 	stale := ""
 	switch {
@@ -638,7 +639,30 @@ func (s *Server) approveRun(w http.ResponseWriter, r *http.Request) {
 		s.notify()
 	}
 	run, _ = s.store.GetRun(r.Context(), run.ID)
+	if complete {
+		s.notifyRun(r.Context(), run, "run.approved", "info", fmt.Sprintf("Approved: %s is being applied", run.StackName),
+			fmt.Sprintf("%s approved by %s; every required approval is in.", b.Step, p.Subject), nil)
+	} else {
+		left := remainingSteps(run)
+		s.notifyRun(r.Context(), run, "run.awaiting_approval", "action", fmt.Sprintf("%s approved %s; still needs %s", p.Subject, run.StackName, strings.Join(left, ", ")),
+			"Plan "+short(deref(run.PlanSHA256))+" in "+run.Environment+".", left)
+	}
 	writeJSON(w, 200, run)
+}
+
+// remainingSteps lists the approval steps a run still needs.
+func remainingSteps(run *store.Run) []string {
+	done := map[string]bool{}
+	for _, a := range run.Approvals {
+		done[a.Step] = true
+	}
+	left := []string{}
+	for _, st := range run.RequiredApprovals {
+		if !done[st] {
+			left = append(left, st)
+		}
+	}
+	return left
 }
 
 func (s *Server) discardRun(w http.ResponseWriter, r *http.Request) {
@@ -668,6 +692,7 @@ func (s *Server) discardRun(w http.ResponseWriter, r *http.Request) {
 	s.engine.Finished(r.Context(), run.ID)
 	s.audit(r.Context(), p.Actor(), "run.discard", "run/"+run.ID, run.BU, map[string]string{"reason": b.Reason})
 	run, _ = s.store.GetRun(r.Context(), run.ID)
+	s.notifyRun(r.Context(), run, "run.discarded", "warning", "Rejected: "+run.StackName, "Discarded by "+p.Subject+": "+b.Reason, nil)
 	writeJSON(w, 200, run)
 }
 
@@ -790,4 +815,12 @@ func (s *Server) knownEntity(r *http.Request, entity string) bool {
 	}
 	_, ok := p.EntityRoles[entity]
 	return ok
+}
+
+// runSpec is the spec a run plans and applies: a pull-request run's own, else the stack's.
+func runSpec(st *store.Stack, run *store.Run) []byte {
+	if len(run.Spec) > 0 {
+		return run.Spec
+	}
+	return st.Spec
 }

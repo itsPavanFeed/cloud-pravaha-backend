@@ -527,3 +527,29 @@ func prefixCols(prefix, cols string) string {
 	}
 	return strings.Join(parts, ", ")
 }
+
+// ---- Slack (interactive approvals) ----
+
+type SlackApp struct {
+	SigningSecret, BotToken []byte // sealed
+	UpdatedBy               string
+	UpdatedAt               time.Time
+}
+
+func (s *Store) PutSlackApp(ctx context.Context, tenantID string, secret, token []byte, by string) error {
+	_, err := s.Pool().Exec(ctx, `INSERT INTO tenant_slack (tenant_id, signing_secret, bot_token, updated_by) VALUES ($1, $2, $3, $4)
+		ON CONFLICT (tenant_id) DO UPDATE SET signing_secret = $2, bot_token = $3, updated_by = $4, updated_at = now()`, tenantID, secret, token, by)
+	return err
+}
+
+func (s *Store) SlackApp(ctx context.Context, tenantID string) (*SlackApp, error) {
+	var a SlackApp
+	err := s.Pool().QueryRow(ctx, `SELECT signing_secret, bot_token, updated_by, updated_at FROM tenant_slack WHERE tenant_id = $1`, tenantID).
+		Scan(&a.SigningSecret, &a.BotToken, &a.UpdatedBy, &a.UpdatedAt)
+	return &a, store.NotFound(err)
+}
+
+func (s *Store) DeleteSlackApp(ctx context.Context, tenantID string) error {
+	_, err := s.Pool().Exec(ctx, `DELETE FROM tenant_slack WHERE tenant_id = $1`, tenantID)
+	return err
+}

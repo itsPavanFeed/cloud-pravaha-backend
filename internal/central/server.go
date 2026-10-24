@@ -91,6 +91,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /auth/callback", s.ssoCallback)
 	mux.HandleFunc("POST /api/v1/auth/exchange", s.authExchange)
 	mux.HandleFunc("POST /webhooks/github/{tenant}", s.githubWebhook)
+	mux.HandleFunc("POST /webhooks/slack/{tenant}", s.slackInteraction)
 	sc := s.scimAuth
 	mux.Handle("GET /scim/v2/ServiceProviderConfig", sc(s.scimConfig))
 	mux.Handle("GET /scim/v2/Users", sc(s.scimListUsers))
@@ -125,6 +126,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/tenants/{tenant}/members", a(s.addMember))
 	mux.Handle("DELETE /api/v1/tenants/{tenant}/members/{id}", a(s.removeMember))
 	mux.Handle("POST /api/v1/tenants/{tenant}/tokens", a(s.issueMemberToken))
+	mux.Handle("GET /api/v1/tenants/{tenant}/slack", a(s.getSlackApp))
+	mux.Handle("PUT /api/v1/tenants/{tenant}/slack", a(s.putSlackApp))
+	mux.Handle("DELETE /api/v1/tenants/{tenant}/slack", a(s.deleteSlackApp))
 
 	// The wrapper: everything under /api/v1/t/{tenant}/ goes to that tenant plane.
 	mux.Handle("/api/v1/t/{tenant}/{rest...}", a(s.proxy))

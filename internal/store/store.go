@@ -296,6 +296,7 @@ type Stack struct {
 	Drift         DriftSettings   `json:"drift"`
 	ManagedBy     string          `json:"managed_by"`           // ui | git
 	SourceRef     string          `json:"source_ref,omitempty"` // contracts repo commit for Git-managed stacks
+	PRNumber      *int            `json:"pr_number,omitempty"`  // proposed by this open pull request, not applied yet
 }
 
 type DriftSettings struct {
@@ -312,7 +313,7 @@ type RunBrief struct {
 }
 
 const stackSelect = `SELECT s.id, s.name, s.bu, s.entity, s.environment_id, e.name, s.spec, s.created_by, s.created_at, s.updated_at,
-	s.drift_interval_minutes, s.drift_auto_remediate, s.last_drift_check, s.managed_by, s.source_ref,
+	s.drift_interval_minutes, s.drift_auto_remediate, s.last_drift_check, s.managed_by, s.source_ref, s.pr_number,
 	lr.id, lr.status, lr.operation, lr.created_at
 	FROM stacks s JOIN environments e ON e.id = s.environment_id
 	LEFT JOIN LATERAL (SELECT id, status, operation, created_at FROM runs WHERE stack_id = s.id ORDER BY created_at DESC LIMIT 1) lr ON true`
@@ -322,7 +323,7 @@ func scanStack(r pgx.Row) (*Stack, error) {
 	var rid, rstatus, rop *string
 	var rat *time.Time
 	err := r.Scan(&x.ID, &x.Name, &x.BU, &x.Entity, &x.EnvironmentID, &x.Environment, &x.Spec, &x.CreatedBy, &x.CreatedAt, &x.UpdatedAt,
-		&x.Drift.IntervalMinutes, &x.Drift.AutoRemediate, &x.Drift.LastCheck, &x.ManagedBy, &x.SourceRef, &rid, &rstatus, &rop, &rat)
+		&x.Drift.IntervalMinutes, &x.Drift.AutoRemediate, &x.Drift.LastCheck, &x.ManagedBy, &x.SourceRef, &x.PRNumber, &rid, &rstatus, &rop, &rat)
 	if rid != nil {
 		x.LastRun = &RunBrief{ID: *rid, Status: *rstatus, Operation: *rop, CreatedAt: *rat}
 	}
@@ -361,7 +362,7 @@ func (s *Store) UpdateStack(ctx context.Context, id string, spec []byte) error {
 // UpdateGitStack replaces a Git-managed stack's spec at a new commit (refused
 // while a run is active, like UpdateStack).
 func (s *Store) UpdateGitStack(ctx context.Context, id string, spec []byte, ref string) error {
-	tag, err := s.db.Exec(ctx, `UPDATE stacks SET spec = $2, source_ref = $3, updated_at = now() WHERE id = $1 AND managed_by = 'git'
+	tag, err := s.db.Exec(ctx, `UPDATE stacks SET spec = $2, source_ref = $3, pr_number = NULL, updated_at = now() WHERE id = $1 AND managed_by = 'git'
 		AND NOT EXISTS (SELECT 1 FROM runs WHERE stack_id = $1 AND status IN ('queued','planning','planned','apply_queued','applying'))`, id, spec, ref)
 	if err == nil && tag.RowsAffected() == 0 {
 		return ErrConflict
@@ -442,11 +443,17 @@ type Run struct {
 	UpdatedAt         time.Time       `json:"updated_at"`
 	PlannedAt         *time.Time      `json:"planned_at,omitempty"`
 	FinishedAt        *time.Time      `json:"finished_at,omitempty"`
+	// Pull-request runs plan the pull request's spec, not the stack's.
+	Spec     json.RawMessage `json:"spec,omitempty"`
+	PRNumber *int            `json:"pr_number,omitempty"`
+	PRSha    *string         `json:"pr_sha,omitempty"`
+	PRURL    *string         `json:"pr_url,omitempty"`
 }
 
 const runSelect = `SELECT r.id, r.stack_id, s.name, s.bu, s.entity, e.name, r.operation, r.status, r.created_by,
 	r.config_hash, r.state_serial, r.plan_sha256, r.plan_summary, r.policy_result, r.risk, r.cost, r.required_approvals, r.error, r.runner_id,
-	r.created_at, r.updated_at, r.planned_at, r.finished_at,
+	r.created_at, r.updated_at, r.planned_at, r.finished_at, r.spec, r.pr_number, r.pr_sha,
+	(SELECT p.html_url FROM pull_requests p WHERE p.number = r.pr_number),
 	COALESCE((SELECT json_agg(json_build_object('step', a.step, 'approver', a.approver, 'reason', a.reason, 'created_at', a.created_at) ORDER BY a.created_at)
 	          FROM run_approvals a WHERE a.run_id = r.id), '[]')
 	FROM runs r JOIN stacks s ON s.id = r.stack_id JOIN environments e ON e.id = s.environment_id`
@@ -456,7 +463,7 @@ func scanRun(r pgx.Row) (*Run, error) {
 	var approvals []byte
 	err := r.Scan(&x.ID, &x.StackID, &x.StackName, &x.BU, &x.Entity, &x.Environment, &x.Operation, &x.Status, &x.CreatedBy,
 		&x.ConfigHash, &x.StateSerial, &x.PlanSHA256, &x.PlanSummary, &x.PolicyResult, &x.Risk, &x.Cost, &x.RequiredApprovals, &x.Error, &x.RunnerID,
-		&x.CreatedAt, &x.UpdatedAt, &x.PlannedAt, &x.FinishedAt, &approvals)
+		&x.CreatedAt, &x.UpdatedAt, &x.PlannedAt, &x.FinishedAt, &x.Spec, &x.PRNumber, &x.PRSha, &x.PRURL, &approvals)
 	if err == nil {
 		json.Unmarshal(approvals, &x.Approvals)
 	}
@@ -1000,4 +1007,225 @@ func (s *Store) ListDeliveries(ctx context.Context, limit int, before int64) ([]
 		out = append(out, d)
 	}
 	return out, rows.Err()
+}
+
+// ---- pull requests ----
+
+// CreatePRRun queues a plan of a pull request's spec for a stack.
+func (s *Store) CreatePRRun(ctx context.Context, stackID, by, configHash string, spec []byte, pr int, sha string) (*Run, error) {
+	var id string
+	err := s.db.QueryRow(ctx, `INSERT INTO runs (stack_id, operation, status, created_by, config_hash, spec, pr_number, pr_sha)
+		VALUES ($1, 'apply', 'queued', $2, $3, $4, $5, $6) RETURNING id`, stackID, by, configHash, spec, pr, sha).Scan(&id)
+	if IsUnique(err) {
+		return nil, ErrConflict
+	}
+	if err != nil {
+		return nil, err
+	}
+	return s.GetRun(ctx, id)
+}
+
+// PRRuns lists a pull request's runs, newest first.
+func (s *Store) PRRuns(ctx context.Context, pr int) ([]*Run, error) {
+	rows, err := s.db.Query(ctx, runSelect+` WHERE r.pr_number = $1 ORDER BY r.created_at DESC`, pr)
+	if err != nil {
+		return nil, err
+	}
+	return Collect(rows, scanRun)
+}
+
+type PullRequest struct {
+	Number     int             `json:"number"`
+	Repo       string          `json:"repo"`
+	Title      string          `json:"title"`
+	Author     string          `json:"author"`
+	HTMLURL    string          `json:"html_url"`
+	HeadSHA    string          `json:"head_sha"`
+	State      string          `json:"state"`
+	Results    json.RawMessage `json:"results"`
+	CommentID  *int64          `json:"-"`
+	CommentSum string          `json:"-"`
+	CreatedAt  time.Time       `json:"created_at"`
+	UpdatedAt  time.Time       `json:"updated_at"`
+	MergedAt   *time.Time      `json:"merged_at,omitempty"`
+}
+
+const prCols = `number, repo, title, author, html_url, head_sha, state, results, comment_id, comment_sum, created_at, updated_at, merged_at`
+
+func scanPR(r pgx.Row) (*PullRequest, error) {
+	var p PullRequest
+	err := r.Scan(&p.Number, &p.Repo, &p.Title, &p.Author, &p.HTMLURL, &p.HeadSHA, &p.State, &p.Results, &p.CommentID, &p.CommentSum, &p.CreatedAt, &p.UpdatedAt, &p.MergedAt)
+	return &p, NotFound(err)
+}
+
+// UpsertPR records a pull request's latest head; a new head reopens it.
+func (s *Store) UpsertPR(ctx context.Context, p *PullRequest) error {
+	_, err := s.db.Exec(ctx, `INSERT INTO pull_requests (number, repo, title, author, html_url, head_sha, state, results)
+		VALUES ($1, $2, $3, $4, $5, $6, 'open', $7)
+		ON CONFLICT (number) DO UPDATE SET repo = $2, title = $3, author = $4, html_url = $5, head_sha = $6, state = 'open', results = $7, updated_at = now()`,
+		p.Number, p.Repo, p.Title, p.Author, p.HTMLURL, p.HeadSHA, p.Results)
+	return err
+}
+
+func (s *Store) GetPR(ctx context.Context, n int) (*PullRequest, error) {
+	return scanPR(s.db.QueryRow(ctx, `SELECT `+prCols+` FROM pull_requests WHERE number = $1`, n))
+}
+
+func (s *Store) OpenPRs(ctx context.Context) ([]*PullRequest, error) {
+	rows, err := s.db.Query(ctx, `SELECT `+prCols+` FROM pull_requests WHERE state = 'open' ORDER BY number`)
+	if err != nil {
+		return nil, err
+	}
+	return Collect(rows, scanPR)
+}
+
+func (s *Store) ListPRs(ctx context.Context, limit int) ([]*PullRequest, error) {
+	rows, err := s.db.Query(ctx, `SELECT `+prCols+` FROM pull_requests ORDER BY updated_at DESC LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	return Collect(rows, scanPR)
+}
+
+func (s *Store) SetPRState(ctx context.Context, n int, state string) error {
+	_, err := s.db.Exec(ctx, `UPDATE pull_requests SET state = $2, updated_at = now(),
+		merged_at = CASE WHEN $2 = 'merged' THEN now() ELSE merged_at END WHERE number = $1`, n, state)
+	return err
+}
+
+func (s *Store) SetPRComment(ctx context.Context, n int, commentID int64, sum string) error {
+	_, err := s.db.Exec(ctx, `UPDATE pull_requests SET comment_id = $2, comment_sum = $3 WHERE number = $1`, n, commentID, sum)
+	return err
+}
+
+// CreateProposedStack creates a Git-managed stack introduced by an open pull request.
+func (s *Store) CreateProposedStack(ctx context.Context, name, bu, entity, envID string, spec []byte, by string, pr int) (*Stack, error) {
+	st, err := s.CreateManagedStack(ctx, name, bu, entity, envID, spec, by, "git", fmt.Sprintf("pr#%d", pr))
+	if err != nil {
+		return nil, err
+	}
+	_, err = s.db.Exec(ctx, `UPDATE stacks SET pr_number = $2 WHERE id = $1`, st.ID, pr)
+	return st, err
+}
+
+// AdoptPRSpec records a pull request's spec as the stack's after it was applied.
+func (s *Store) AdoptPRSpec(ctx context.Context, stackID string, spec []byte, ref string) error {
+	_, err := s.db.Exec(ctx, `UPDATE stacks SET spec = $2, source_ref = $3, pr_number = NULL, updated_at = now() WHERE id = $1`, stackID, spec, ref)
+	return err
+}
+
+// DropProposedStacks deletes stacks a closed pull request proposed that never
+// got state, with their runs. Stacks with state are kept.
+func (s *Store) DropProposedStacks(ctx context.Context, pr int) ([]string, error) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	rows, err := tx.Query(ctx, `SELECT id, name FROM stacks s WHERE pr_number = $1
+		AND NOT EXISTS (SELECT 1 FROM state_versions v WHERE v.stack_id = s.id) FOR UPDATE`, pr)
+	if err != nil {
+		return nil, err
+	}
+	var ids, names []string
+	for rows.Next() {
+		var id, name string
+		if err := rows.Scan(&id, &name); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		ids, names = append(ids, id), append(names, name)
+	}
+	rows.Close()
+	for _, q := range []string{
+		`DELETE FROM run_logs WHERE run_id IN (SELECT id FROM runs WHERE stack_id = ANY($1::uuid[]))`,
+		`DELETE FROM run_approvals WHERE run_id IN (SELECT id FROM runs WHERE stack_id = ANY($1::uuid[]))`,
+		`DELETE FROM state_locks WHERE stack_id = ANY($1::uuid[])`,
+		`DELETE FROM runs WHERE stack_id = ANY($1::uuid[])`,
+		`DELETE FROM stacks WHERE id = ANY($1::uuid[])`,
+	} {
+		if _, err := tx.Exec(ctx, q, ids); err != nil {
+			return nil, err
+		}
+	}
+	return names, tx.Commit(ctx)
+}
+
+// StackBusy reports whether a stack has an active run (the stack lock is held).
+func (s *Store) StackBusy(ctx context.Context, stackName string) (bool, error) {
+	var busy bool
+	err := s.db.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM runs r JOIN stacks s ON s.id = r.stack_id
+		WHERE s.name = $1 AND r.status IN ('queued','planning','planned','apply_queued','applying'))`, stackName).Scan(&busy)
+	return busy, err
+}
+
+// ---- notifications ----
+
+type Notification struct {
+	ID        int64     `json:"id"`
+	Kind      string    `json:"kind"`
+	Severity  string    `json:"severity"`
+	Title     string    `json:"title"`
+	Body      string    `json:"body"`
+	Link      string    `json:"link"`
+	BU        string    `json:"bu"`
+	Entity    string    `json:"entity"`
+	RunID     *string   `json:"run_id,omitempty"`
+	Steps     []string  `json:"steps"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+const notifCols = `id, kind, severity, title, body, link, bu, entity, run_id, steps, created_at`
+
+func scanNotif(r pgx.Row) (*Notification, error) {
+	var n Notification
+	err := r.Scan(&n.ID, &n.Kind, &n.Severity, &n.Title, &n.Body, &n.Link, &n.BU, &n.Entity, &n.RunID, &n.Steps, &n.CreatedAt)
+	if n.Steps == nil {
+		n.Steps = []string{}
+	}
+	return &n, NotFound(err)
+}
+
+func (s *Store) AddNotification(ctx context.Context, n *Notification) (*Notification, error) {
+	if n.Steps == nil {
+		n.Steps = []string{}
+	}
+	return scanNotif(s.db.QueryRow(ctx, `INSERT INTO notifications (kind, severity, title, body, link, bu, entity, run_id, steps)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING `+notifCols, n.Kind, n.Severity, n.Title, n.Body, n.Link, n.BU, n.Entity, n.RunID, n.Steps))
+}
+
+// visibleNotif filters to the given business units (nil = all); tenant-wide
+// notifications (bu = '') are visible to everyone in the tenant.
+func visibleNotif(bus []string, args *[]any) string {
+	if bus == nil {
+		return "true"
+	}
+	*args = append(*args, bus)
+	return fmt.Sprintf("(bu = '' OR bu = ANY($%d))", len(*args))
+}
+
+// ListNotifications returns notifications newest first, older than before (0 = newest).
+func (s *Store) ListNotifications(ctx context.Context, bus []string, before int64, limit int) ([]*Notification, error) {
+	args := []any{limit, before}
+	rows, err := s.db.Query(ctx, `SELECT `+notifCols+` FROM notifications WHERE ($2 = 0 OR id < $2) AND `+visibleNotif(bus, &args)+` ORDER BY id DESC LIMIT $1`, args...)
+	if err != nil {
+		return nil, err
+	}
+	return Collect(rows, scanNotif)
+}
+
+// UnreadNotifications counts visible notifications after the person's watermark.
+func (s *Store) UnreadNotifications(ctx context.Context, subject string, bus []string) (int, int64, error) {
+	args := []any{subject}
+	var n int
+	var last int64
+	err := s.db.QueryRow(ctx, `SELECT count(*) FILTER (WHERE id > COALESCE((SELECT last_id FROM notification_reads WHERE subject = $1), 0)),
+		COALESCE(max(id), 0) FROM notifications WHERE `+visibleNotif(bus, &args), args...).Scan(&n, &last)
+	return n, last, err
+}
+
+func (s *Store) MarkNotificationsRead(ctx context.Context, subject string, upTo int64) error {
+	_, err := s.db.Exec(ctx, `INSERT INTO notification_reads (subject, last_id) VALUES ($1, $2)
+		ON CONFLICT (subject) DO UPDATE SET last_id = GREATEST(notification_reads.last_id, $2)`, subject, upTo)
+	return err
 }

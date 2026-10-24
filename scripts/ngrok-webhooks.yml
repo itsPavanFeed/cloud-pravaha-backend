@@ -1,6 +1,6 @@
 # ngrok traffic policy for development: expose only webhook endpoints of the
 # central plane, never the console or the API.
-#   ngrok http 8090 --traffic-policy-file scripts/ngrok-webhooks.yml
+#   ngrok http 8090 --traffic-policy-file scripts/ngrok-webhooks.yml   (GitHub and Slack webhooks)
 on_http_request:
   - expressions:
       - "!req.url.path.startsWith('/webhooks/')"

@@ -58,6 +58,7 @@ type Server struct {
 	gh            ghCache                           // GitHub App with its token cache
 	ghSnap        atomic.Pointer[ghSettings]        // GitHub App settings, reloaded on change
 	dirSnap       atomic.Pointer[map[string]string] // business unit → entity, learned from central
+	slackSnap     atomic.Pointer[slackSettings]     // Slack incoming webhook, reloaded on change
 }
 
 func New(cfg *config.Server, st *store.Store, cat *catalog.Catalog, sealer *secure.Sealer, iss *oidc.Issuer, log *slog.Logger) (*Server, error) {
@@ -72,6 +73,7 @@ func New(cfg *config.Server, st *store.Store, cat *catalog.Catalog, sealer *secu
 		return nil, err
 	}
 	srv.loadDirectory(context.Background())
+	srv.loadSlack(context.Background())
 	if err := srv.ghReload(context.Background()); err != nil {
 		return nil, fmt.Errorf("loading GitHub App settings: %w", err)
 	}
@@ -118,6 +120,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/stacks", u(s.listStacks))
 	mux.Handle("POST /api/v1/stacks", u(s.createStack))
 	mux.Handle("POST /api/v1/stacks/preview", u(s.previewStack))
+	mux.Handle("POST /api/v1/stacks/propose", u(s.proposeStack))
 	mux.Handle("GET /api/v1/stacks/{id}", u(s.getStack))
 	mux.Handle("PUT /api/v1/stacks/{id}", u(s.updateStack))
 	mux.Handle("GET /api/v1/stacks/{id}/runs", u(s.listStackRuns))
@@ -150,6 +153,15 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/integrations/github/test", u(s.testGitHubIntegration))
 	mux.Handle("GET /api/v1/integrations/github/deliveries", u(s.listGitHubDeliveries))
 	mux.Handle("POST /api/v1/webhooks/github", s.authRelay(s.githubWebhook))
+	mux.Handle("GET /api/v1/pull-requests", u(s.listPullRequests))
+	mux.Handle("GET /api/v1/notifications", u(s.listNotifications))
+	mux.Handle("GET /api/v1/notifications/unread", u(s.unreadNotifications))
+	mux.Handle("POST /api/v1/notifications/read", u(s.readNotifications))
+	mux.Handle("GET /api/v1/integrations/slack", u(s.getSlackIntegration))
+	mux.Handle("PUT /api/v1/integrations/slack", u(s.putSlackIntegration))
+	mux.Handle("DELETE /api/v1/integrations/slack", u(s.deleteSlackIntegration))
+	mux.Handle("POST /api/v1/integrations/slack/test", u(s.testSlackIntegration))
+	mux.Handle("POST /api/v1/pull-requests/{n}/plan", u(s.replanPullRequest))
 	mux.Handle("GET /api/v1/runners", u(s.listRunners))
 	mux.Handle("POST /api/v1/runners", u(s.createRunner))
 	mux.Handle("DELETE /api/v1/runners/{id}", u(s.revokeRunner))
@@ -202,6 +214,7 @@ func (s *Server) Run(ctx context.Context) error {
 	go s.reaper(ctx)
 	go s.contractsSyncer(ctx)
 	go s.ghWatch(ctx)
+	go s.prReconciler(ctx)
 	s.log.Info("tenant plane serving HTTPS", "tenant", s.cfg.Tenant, "listen", s.cfg.Listen, "central", s.cfg.CentralURL)
 	return httpx.Serve(ctx, s.log, s.cfg.Listen, s.Handler(), tlsCfg, "", "")
 }

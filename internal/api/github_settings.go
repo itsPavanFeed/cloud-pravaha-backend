@@ -185,6 +185,7 @@ func (s *Server) ghClear(ctx context.Context) error {
 // within two seconds; database settings (changed by another replica) within a minute.
 func (s *Server) ghWatch(ctx context.Context) {
 	reload := func() {
+		s.loadSlack(ctx)
 		if err := s.ghReload(ctx); err != nil {
 			s.log.Warn("reloading GitHub App settings failed", "err", err)
 			return
@@ -204,6 +205,7 @@ func (s *Server) ghWatch(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			s.loadSlack(ctx)
 			if err := s.ghReload(ctx); err != nil {
 				s.log.Warn("reloading GitHub App settings failed", "err", err)
 			}

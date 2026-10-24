@@ -122,6 +122,45 @@ Every resource a stack creates is labelled with `pravaha-tenant`, `pravaha-entit
 
 Values are normalised to the strictest rules, which are GCP's.
 
+## Pull-request plans: apply before merge
+
+With a GitHub contracts repository that uses the GitHub App, every pull request against the contracts branch goes through these steps:
+
+1. **Plan.** Each changed contract gets a run that plans the pull request's version of the spec. A new stack is created as *proposed*.
+2. **Report.** One comment on the pull request summarises each stack: status, risk, approvals signed and still needed, monthly cost, and a link to the run. A `pravaha/apply` commit status tracks progress.
+3. **Approve and apply.** The usual risk-based approvals apply, in the console or in Slack. Each apply uses exactly the pull request's spec, and that spec becomes the stack's.
+4. **Merge.** When every changed stack has applied, the status turns green and the platform squash-merges the pull request, pinned to the applied commit. The branch therefore only ever holds what is deployed. If the merge fails, the pull request is marked as applied, with a comment.
+5. **New commits and closing.** A new commit discards the old plans and plans again. `/plan` in a comment does the same. Closing without merging discards the plans and removes proposed stacks that never applied.
+6. **Not planned:** pull requests from forks, and drafts.
+
+Require the `pravaha/apply` status in the contracts branch's protection rules, so nobody merges before the apply.
+
+## Self-service through Git
+
+When the contracts repository is on GitHub with the app, **New stack** (and assistant drafts) offers **Open a pull request** instead of creating the stack directly. The platform:
+1. creates a `pravaha/<stack>-<id>` branch;
+2. commits the contract at its folder path, `<entity>/<environment>/<bu>/` in the nested layout;
+3. opens a pull request that names the requester.
+
+The pull request then follows the flow above. The API is `POST /stacks/propose`, with the same body as `POST /stacks`. The app needs **Contents: write**, **Pull requests: write** and **Commit statuses: write**. The connection test checks what the installation actually granted, reports permission updates the installation has not accepted yet, and flags permissions the platform does not need.
+
+## Notifications and Slack
+
+Every event of interest is recorded in the notification centre: the bell in the console, filtered by business unit like everything else.
+- runs awaiting approval, approved, auto-approved, applied, failed, blocked by policy or rejected;
+- drift found;
+- pull requests planned or merged;
+- contracts sync failures.
+
+**Slack alerts.** With an incoming webhook (Integrations → Slack, or `PRAVAHA_SLACK_WEBHOOK_URL` in the env file), every notification is also posted to a channel.
+
+**Approve and reject from Slack.** With a Slack app's signing secret and bot token (scopes `users:read`, `users:read.email`) stored on central, approval requests carry **Approve as …** and **Reject** buttons. Slack calls `POST /webhooks/slack/{tenant}` on central, which:
+1. verifies `X-Slack-Signature`, rejecting requests older than five minutes;
+2. resolves the clicking user's email and maps it to a Cloud Pravaha user;
+3. calls the tenant plane as that user, exactly like the console.
+
+Role checks, separation of duties and the audit trail are unchanged. The approval is recorded under the person's name with the reason "approved in Slack". Unknown Slack users are refused.
+
 ## Backporting: importing existing resources
 
 A stack spec can list `imports`: an address inside one of the stack's catalog modules and the cloud ID of a resource that already exists. The platform generates OpenTofu `import` blocks, so the plan adopts those resources into the module's state instead of creating them.
@@ -278,7 +317,7 @@ SCIM 2.0 lives at `<central>/scim/v2`; create its bearer token with `pravaha cen
 | `PRAVAHA_ENV_FILE` | Optional writable `.env` for integration settings (`PRAVAHA_GITHUB_APP_ID`, `PRAVAHA_GITHUB_APP_INSTALLATION_ID`, `PRAVAHA_GITHUB_API_URL`, `PRAVAHA_GITHUB_APP_PRIVATE_KEY_FILE`, `PRAVAHA_GITHUB_WEBHOOK_SECRET`), watched and hot-reloaded. Without it, they are sealed in the database |
 | `PRAVAHA_ASSISTANT_DOCS_DIR` | Directory of extra Markdown files (runbooks, conventions) to index |
 
-**Runner:** `PRAVAHA_SERVER_URL` (its tenant plane), `PRAVAHA_RUNNER_TOKEN`, `PRAVAHA_STATE_KEY` (32+ characters, shared by the pool, never seen by any plane), `PRAVAHA_CA_FILE`, `PRAVAHA_CATALOG_DIR` (pins the catalog locally), `PRAVAHA_PLUGIN_CACHE_DIR`, `PRAVAHA_WORK_DIR`.
+**Runner:** `PRAVAHA_RUNNER_CONCURRENCY` sets how many runs one runner executes at once. The default is 2, the maximum 16. Each run gets its own work directory and TMPDIR, removed afterwards. Environments can limit what one run creates and imports with `max_creates` and `max_imports`, where 0 means no limit. Other settings: `PRAVAHA_SERVER_URL` (its tenant plane), `PRAVAHA_RUNNER_TOKEN`, `PRAVAHA_STATE_KEY` (32+ characters, shared by the pool, never seen by any plane), `PRAVAHA_CA_FILE`, `PRAVAHA_CATALOG_DIR` (pins the catalog locally), `PRAVAHA_PLUGIN_CACHE_DIR`, `PRAVAHA_WORK_DIR`.
 
 ## CLI
 
