@@ -102,7 +102,7 @@ func (s *Server) provider(ctx context.Context, refresh bool) (*oidcProvider, err
 }
 
 func (s *Server) authConfig(w http.ResponseWriter, r *http.Request) {
-	httpx.WriteJSON(w, 200, map[string]any{"sso": s.cfg.OIDCIssuer != "", "label": s.cfg.OIDCLabel})
+	httpx.WriteJSON(w, 200, map[string]any{"sso": s.cfg.OIDCIssuer != "", "label": s.cfg.OIDCLabel, "webhook_base_url": s.webhookBase()})
 }
 
 func (s *Server) ssoLogin(w http.ResponseWriter, r *http.Request) {

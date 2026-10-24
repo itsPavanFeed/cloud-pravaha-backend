@@ -62,6 +62,22 @@ if [[ "${DEV_ASSISTANT:-}" == fake ]]; then
   export PRAVAHA_ASSISTANT_API_KEY=dev-fake-key PRAVAHA_ASSISTANT_BASE_URL=http://127.0.0.1:18998
 fi
 
+# Webhooks from GitHub need a public address: PRAVAHA_WEBHOOK_BASE_URL, or an
+# ngrok tunnel to the central port if one is running (ngrok http $CP).
+if [[ -z "${PRAVAHA_WEBHOOK_BASE_URL:-}" ]]; then
+  PRAVAHA_WEBHOOK_BASE_URL=$(curl -fsS http://127.0.0.1:4040/api/tunnels 2>/dev/null | python3 -c '
+import json,sys
+for t in json.load(sys.stdin).get("tunnels",[]):
+    if t.get("public_url","").startswith("https://") and t.get("config",{}).get("addr","").endswith(":'"$CP"'"):
+        print(t["public_url"]); break' 2>/dev/null || true)
+fi
+export PRAVAHA_WEBHOOK_BASE_URL
+# Integration settings (GitHub App, webhook URL) live in .env and are hot-reloaded.
+export PRAVAHA_ENV_FILE="${PRAVAHA_ENV_FILE:-$PWD/.env}"
+[[ -f "$PRAVAHA_ENV_FILE" ]] || (umask 077; : > "$PRAVAHA_ENV_FILE")
+HOOK_FROM_ENV=$(sed -n 's/^PRAVAHA_WEBHOOK_BASE_URL=//p' "$PRAVAHA_ENV_FILE" | tail -1)
+[[ -n "$HOOK_FROM_ENV" ]] && PRAVAHA_WEBHOOK_BASE_URL="$HOOK_FROM_ENV"
+
 PRAVAHA_DATABASE_URL="$(dburl central)" PRAVAHA_MASTER_KEY="$CENTRAL_MASTER_KEY" PRAVAHA_LISTEN=127.0.0.1:$CP \
 PRAVAHA_PUBLIC_URL="$CENTRAL" PRAVAHA_INSECURE_HTTP=1 PRAVAHA_WEB_DIR="$WEB/dist" \
 PRAVAHA_CLIENT_CERT="$C/central-client.pem" PRAVAHA_CLIENT_KEY="$C/central-client-key.pem" \
@@ -120,9 +136,12 @@ PRAVAHA_CATALOG_DIR="$ROOT/cloud-pravaha-modules/catalog" \
 PIDS+=($!)
 mkdir -p "$DEV/plugin-cache"
 
+HOOKS="${PRAVAHA_WEBHOOK_BASE_URL:+$PRAVAHA_WEBHOOK_BASE_URL/webhooks/github/acme}"
+HOOKS="${HOOKS:-no public URL (run ngrok http $CP before dev-up, or set PRAVAHA_WEBHOOK_BASE_URL)}"
 cat <<EOT
 
   Cloud Pravaha is running at $CENTRAL  (central plane)  ->  tenant acme at https://localhost:$TP
+  GitHub webhooks: $HOOKS
   Sign in with a token from $DEV/tokens.env:
     Tenant acme > entities Retail (BUs Payments, Checkout) and Platform (BU Data)
     ALICE  developer, BU Payments: plans stacks      MIKE   manager, BU Payments: signs the manager step

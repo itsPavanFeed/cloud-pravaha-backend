@@ -150,6 +150,41 @@ func (s *Store) ListConnections(ctx context.Context) ([]*Connection, error) {
 	return Collect(rows, scanConn)
 }
 
+// ConnectionPage lists connections of one cloud ("" = all), a page at a time,
+// with the total count and the count per cloud.
+func (s *Store) ConnectionPage(ctx context.Context, provider string, limit, offset int) ([]*Connection, int, map[string]int, error) {
+	counts := map[string]int{}
+	rows, err := s.db.Query(ctx, `SELECT cloud->>'provider', count(*) FROM cloud_connections GROUP BY 1`)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	for rows.Next() {
+		var p *string
+		var n int
+		if err := rows.Scan(&p, &n); err != nil {
+			rows.Close()
+			return nil, 0, nil, err
+		}
+		if p != nil {
+			counts[*p] = n
+		}
+	}
+	rows.Close()
+	total := 0
+	for k, n := range counts {
+		if provider == "" || k == provider {
+			total += n
+		}
+	}
+	rows, err = s.db.Query(ctx, `SELECT `+connCols+` FROM cloud_connections WHERE $1 = '' OR cloud->>'provider' = $1
+		ORDER BY name LIMIT $2 OFFSET $3`, provider, limit, offset)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	cs, err := Collect(rows, scanConn)
+	return cs, total, counts, err
+}
+
 // ---- environments ----
 
 // Environment is a deployment target inside a BU: a cloud connection (or none)
@@ -890,4 +925,54 @@ func (s *Store) DeleteEnvironment(ctx context.Context, id string) error {
 }
 func (s *Store) DeletePolicySet(ctx context.Context, id string) error {
 	return s.deleteRow(ctx, "policy_sets", id)
+}
+
+func (s *Store) DeleteSetting(ctx context.Context, key string) error {
+	_, err := s.db.Exec(ctx, `DELETE FROM tenant_settings WHERE key = $1`, key)
+	return err
+}
+
+// ---- webhook deliveries ----
+
+type WebhookDelivery struct {
+	ID         int64     `json:"id"`
+	Provider   string    `json:"provider"`
+	DeliveryID string    `json:"delivery_id"`
+	Event      string    `json:"event"`
+	Action     string    `json:"action"`
+	Repo       string    `json:"repo"`
+	Ref        string    `json:"ref"`
+	Sender     string    `json:"sender"`
+	Outcome    string    `json:"outcome"`
+	Detail     string    `json:"detail"`
+	ReceivedAt time.Time `json:"received_at"`
+}
+
+// RecordDelivery stores a delivery once; a redelivery of the same ID is a conflict.
+func (s *Store) RecordDelivery(ctx context.Context, d *WebhookDelivery) error {
+	_, err := s.db.Exec(ctx, `INSERT INTO webhook_deliveries (provider, delivery_id, event, action, repo, ref, sender, outcome, detail)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, d.Provider, d.DeliveryID, d.Event, d.Action, d.Repo, d.Ref, d.Sender, d.Outcome, d.Detail)
+	if IsUnique(err) {
+		return ErrConflict
+	}
+	return err
+}
+
+// ListDeliveries returns deliveries newest first, older than before (0 = newest).
+func (s *Store) ListDeliveries(ctx context.Context, limit int, before int64) ([]WebhookDelivery, error) {
+	rows, err := s.db.Query(ctx, `SELECT id, provider, delivery_id, event, action, repo, ref, sender, outcome, detail, received_at
+		FROM webhook_deliveries WHERE $2 = 0 OR id < $2 ORDER BY id DESC LIMIT $1`, limit, before)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []WebhookDelivery{}
+	for rows.Next() {
+		var d WebhookDelivery
+		if err := rows.Scan(&d.ID, &d.Provider, &d.DeliveryID, &d.Event, &d.Action, &d.Repo, &d.Ref, &d.Sender, &d.Outcome, &d.Detail, &d.ReceivedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
 }

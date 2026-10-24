@@ -41,6 +41,7 @@ type Config struct {
 	Branch           string `json:"branch"`            // e.g. main
 	Path             string `json:"path"`              // folder holding contracts, e.g. stacks
 	APIURL           string `json:"api_url,omitempty"` // GitHub Enterprise / self-hosted GitLab API base
+	Auth             string `json:"auth,omitempty"`    // token (default) | github_app
 	PollSeconds      int    `json:"poll_seconds"`      // >= 30
 	AutoPlan         bool   `json:"auto_plan"`         // queue a plan for every new or changed contract
 	AutoApplyLowRisk bool   `json:"auto_apply_low_risk"`
@@ -75,6 +76,15 @@ func (c *Config) Validate(allowLocal bool) error {
 		}
 	default:
 		errs = append(errs, errors.New(`provider must be "github" or "gitlab"`))
+	}
+	switch c.Auth {
+	case "", "token":
+	case "github_app":
+		if c.Provider != "github" {
+			errs = append(errs, errors.New(`auth "github_app" works only with the github provider`))
+		}
+	default:
+		errs = append(errs, errors.New(`auth must be "token" or "github_app"`))
 	}
 	if !branchRe.MatchString(c.Branch) || strings.Contains(c.Branch, "..") {
 		errs = append(errs, errors.New("branch is invalid"))

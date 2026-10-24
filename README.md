@@ -73,6 +73,29 @@ Each tenant can keep its stacks as contracts in a Git branch (GitHub, GitLab, or
 
 API: `GET/PUT /contracts`, `PUT /contracts/token` (read-only token, sealed with the tenant master key, never returned), and `POST /contracts/sync`. The development-only `local` provider needs `PRAVAHA_ALLOW_LOCAL_CONTRACTS=1`.
 
+## GitHub App and webhooks
+
+Each tenant can connect its own GitHub App under **Integrations** (tenant admins). It needs:
+- the App ID;
+- the app's private key (`.pem`);
+- a webhook secret;
+- the installation ID, which is optional: it is detected from the contracts repository.
+
+What the app is used for:
+- **Authentication.** The contracts repository can use `"auth": "github_app"` instead of a personal access token. The tenant plane signs a 9-minute app JWT and exchanges it for a one-hour installation token, cached in memory.
+- **Webhooks.** In the app, set the webhook URL to `<PRAVAHA_WEBHOOK_BASE_URL>/webhooks/github/<tenant>`, the content type to JSON, and the same secret.
+  - Central keeps no secret. It relays the delivery unchanged to the tenant plane over mTLS, with a relay assertion bound to that tenant.
+  - The tenant plane verifies `X-Hub-Signature-256` and drops duplicate delivery IDs.
+  - A push to the contracts branch starts a sync at once. Pings are answered, installation events record the installation, and other events are logged for pull-request plans.
+  - Verified deliveries are listed on the Integrations page.
+- **Permissions and events.** Repository permissions: Contents: Read, Metadata: Read, Pull requests: Read & write, Checks: Read & write. Events: Push, Pull request, Issue comment. **Test connection** checks all of this.
+
+**Where the settings live.**
+- **With `PRAVAHA_ENV_FILE`** (a writable `.env`, for development or a single-host install): the console writes the `PRAVAHA_GITHUB_*` keys there, and the private key to a 0600 PEM file beside it. Both planes watch the file and reload within two seconds. Central also takes `PRAVAHA_WEBHOOK_BASE_URL` from it.
+- **Without it** (for example Kubernetes): the settings are sealed in the tenant database.
+
+Either way they are held in memory, so webhook deliveries and token minting never read the file or the database. For local development, `ngrok http 8090 --traffic-policy-file scripts/ngrok-webhooks.yml` exposes only `/webhooks/*`, and `scripts/dev-up.sh` picks up the tunnel or the `.env` value.
+
 ## Backporting: importing existing resources
 
 A stack spec can list `imports`: an address inside one of the stack's catalog modules and the cloud ID of a resource that already exists. The platform generates OpenTofu `import` blocks, so the plan adopts those resources into the module's state instead of creating them.
@@ -226,6 +249,7 @@ SCIM 2.0 lives at `<central>/scim/v2`; create its bearer token with `pravaha cen
 | `PRAVAHA_ASSISTANT_API_KEY` | Optional Anthropic API key (use `_FILE`). Setting it enables the assistant |
 | `PRAVAHA_ASSISTANT_MODEL`, `PRAVAHA_ASSISTANT_EFFORT` | Model (default `claude-opus-5-5`) and effort (`low`…`max`, default `medium`) |
 | `PRAVAHA_ASSISTANT_BASE_URL` | Optional API gateway (https; plain http only on loopback). Server-side refusal fallbacks are used only against the Anthropic API directly; `PRAVAHA_ASSISTANT_FALLBACKS=0` turns them off |
+| `PRAVAHA_ENV_FILE` | Optional writable `.env` for integration settings (`PRAVAHA_GITHUB_APP_ID`, `PRAVAHA_GITHUB_APP_INSTALLATION_ID`, `PRAVAHA_GITHUB_API_URL`, `PRAVAHA_GITHUB_APP_PRIVATE_KEY_FILE`, `PRAVAHA_GITHUB_WEBHOOK_SECRET`), watched and hot-reloaded. Without it, they are sealed in the database |
 | `PRAVAHA_ASSISTANT_DOCS_DIR` | Directory of extra Markdown files (runbooks, conventions) to index |
 
 **Runner:** `PRAVAHA_SERVER_URL` (its tenant plane), `PRAVAHA_RUNNER_TOKEN`, `PRAVAHA_STATE_KEY` (32+ characters, shared by the pool, never seen by any plane), `PRAVAHA_CA_FILE`, `PRAVAHA_CATALOG_DIR` (pins the catalog locally), `PRAVAHA_PLUGIN_CACHE_DIR`, `PRAVAHA_WORK_DIR`.

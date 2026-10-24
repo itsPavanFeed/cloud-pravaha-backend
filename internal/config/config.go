@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -50,6 +51,10 @@ type Server struct {
 	AssistantEffort    string // low | medium | high | xhigh | max
 	AssistantDocsDir   string // extra Markdown files to index (README, runbooks)
 	AssistantFallbacks bool
+
+	// EnvFile is a writable .env holding integration settings (PRAVAHA_GITHUB_*);
+	// they are watched and reloaded. Empty keeps them sealed in the database.
+	EnvFile string
 }
 
 // Central configures the central plane: frontend, identity, tenant routing.
@@ -73,6 +78,11 @@ type Central struct {
 	OIDCAllowedDomains  []string // optional email domain allowlist
 	OIDCTrustUnverified bool     // accept tokens without email_verified=true (some IdPs omit it)
 	OIDCLabel           string   // button text, e.g. "Sign in with Okta"
+
+	// WebhookBaseURL is the public address Git hosts post webhooks to, when it
+	// differs from PublicURL (e.g. an ngrok tunnel or a dedicated ingress).
+	WebhookBaseURL string
+	EnvFile        string // optional .env watched for PRAVAHA_WEBHOOK_BASE_URL
 }
 
 type Runner struct {
@@ -122,6 +132,7 @@ func LoadServer() (*Server, error) {
 		AssistantEffort:    env("PRAVAHA_ASSISTANT_EFFORT", "medium"),
 		AssistantDocsDir:   os.Getenv("PRAVAHA_ASSISTANT_DOCS_DIR"),
 		AssistantFallbacks: os.Getenv("PRAVAHA_ASSISTANT_FALLBACKS") != "0",
+		EnvFile:            absPath(os.Getenv("PRAVAHA_ENV_FILE")),
 	}
 	var errs []error
 	errs = append(errs, common(c.DatabaseURL, c.MasterKey, c.PublicURL, false)...)
@@ -171,6 +182,8 @@ func LoadCentral() (*Central, error) {
 		OIDCRedirectURL:     os.Getenv("PRAVAHA_OIDC_REDIRECT_URL"),
 		OIDCTrustUnverified: os.Getenv("PRAVAHA_OIDC_TRUST_UNVERIFIED_EMAIL") == "1",
 		OIDCLabel:           env("PRAVAHA_OIDC_LABEL", "Sign in with SSO"),
+		WebhookBaseURL:      strings.TrimRight(os.Getenv("PRAVAHA_WEBHOOK_BASE_URL"), "/"),
+		EnvFile:             absPath(os.Getenv("PRAVAHA_ENV_FILE")),
 	}
 	for _, d := range strings.Split(os.Getenv("PRAVAHA_OIDC_ALLOWED_DOMAINS"), ",") {
 		if d = strings.ToLower(strings.TrimSpace(d)); d != "" {
@@ -188,6 +201,11 @@ func LoadCentral() (*Central, error) {
 	}
 	if c.ClientCert == "" || c.ClientKey == "" {
 		errs = append(errs, errors.New("PRAVAHA_CLIENT_CERT and PRAVAHA_CLIENT_KEY are required: central calls tenant planes over mTLS"))
+	}
+	if c.WebhookBaseURL != "" {
+		if u, err := url.Parse(c.WebhookBaseURL); err != nil || u.Host == "" || u.Path != "" || u.Scheme != "https" {
+			errs = append(errs, errors.New("PRAVAHA_WEBHOOK_BASE_URL must be an https origin, e.g. https://hooks.example.com"))
+		}
 	}
 	if c.OIDCIssuer != "" {
 		if u, err := url.Parse(c.OIDCIssuer); err != nil || u.Host == "" || (u.Scheme != "https" && !(u.Scheme == "http" && loopbackHost(u.Hostname()))) {
@@ -280,4 +298,14 @@ func loopbackHost(h string) bool {
 func hostname() string {
 	h, _ := os.Hostname()
 	return h
+}
+
+func absPath(p string) string {
+	if p == "" {
+		return ""
+	}
+	if a, err := filepath.Abs(p); err == nil {
+		return a
+	}
+	return p
 }

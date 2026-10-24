@@ -86,6 +86,7 @@ services:
       PRAVAHA_DATABASE_URL: postgres://pravaha:${POSTGRES_PASSWORD}@postgres:5432/central?sslmode=disable
       PRAVAHA_MASTER_KEY: ${CENTRAL_MASTER_KEY:?set CENTRAL_MASTER_KEY in .env}
       PRAVAHA_PUBLIC_URL: ${PRAVAHA_PUBLIC_URL:-https://localhost:8443}
+      PRAVAHA_WEBHOOK_BASE_URL: ${PRAVAHA_WEBHOOK_BASE_URL:-}  # public address for GitHub App webhooks
       PRAVAHA_LISTEN: ":8443"
       PRAVAHA_TLS_CERT: /certs/central.pem
       PRAVAHA_TLS_KEY: /certs/central-key.pem

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"regexp"
+	"strconv"
 
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/identity"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/spec"
@@ -20,6 +21,27 @@ type connBody struct {
 
 // Everyone in the tenant may read connections: they hold identifiers only.
 func (s *Server) listConnections(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	if q.Has("limit") { // a page: {items, total, counts}
+		provider := q.Get("provider")
+		switch provider {
+		case "", "aws", "gcp", "azure":
+		default:
+			writeErr(w, 422, "provider must be aws, gcp or azure")
+			return
+		}
+		offset, _ := strconv.Atoi(q.Get("offset"))
+		if offset < 0 {
+			offset = 0
+		}
+		cs, total, counts, err := s.store.ConnectionPage(r.Context(), provider, limit(r, 10, 100), offset)
+		if err != nil {
+			s.writeStoreErr(w, err, "")
+			return
+		}
+		writeJSON(w, 200, map[string]any{"items": cs, "total": total, "counts": counts})
+		return
+	}
 	cs, err := s.store.ListConnections(r.Context())
 	if err != nil {
 		s.writeStoreErr(w, err, "")

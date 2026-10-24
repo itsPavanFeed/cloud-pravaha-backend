@@ -23,10 +23,12 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/certs"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/config"
+	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/envfile"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/httpx"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/identity"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/oidc"
@@ -43,12 +45,15 @@ var (
 )
 
 type Server struct {
-	cfg     *config.Central
-	store   *Store
-	issuer  *oidc.Issuer
-	cert    *certs.KeyPair // mTLS client identity, reloaded when rotated
-	log     *slog.Logger
-	limiter *httpx.Limiter
+	cfg      *config.Central
+	store    *Store
+	issuer   *oidc.Issuer
+	cert     *certs.KeyPair // mTLS client identity, reloaded when rotated
+	log      *slog.Logger
+	limiter  *httpx.Limiter
+	hookBase atomic.Value // string: public webhook base URL from PRAVAHA_ENV_FILE
+	// hookLimiter blocks addresses that send unsigned or rejected webhooks.
+	hookLimiter *httpx.Limiter
 
 	mu         sync.Mutex
 	transports map[string]*tenantTransport
@@ -66,7 +71,7 @@ func New(cfg *config.Central, st *Store, iss *oidc.Issuer, log *slog.Logger) (*S
 		return nil, fmt.Errorf("loading mTLS client certificate: %w", err)
 	}
 	return &Server{cfg: cfg, store: st, issuer: iss, cert: cert, log: log,
-		limiter: httpx.NewLimiter(10, time.Minute, 5*time.Minute), transports: map[string]*tenantTransport{}}, nil
+		limiter: httpx.NewLimiter(10, time.Minute, 5*time.Minute), hookLimiter: httpx.NewLimiter(30, time.Minute, 10*time.Minute), transports: map[string]*tenantTransport{}}, nil
 }
 
 func (s *Server) Handler() http.Handler {
@@ -85,6 +90,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /auth/login", s.ssoLogin)
 	mux.HandleFunc("GET /auth/callback", s.ssoCallback)
 	mux.HandleFunc("POST /api/v1/auth/exchange", s.authExchange)
+	mux.HandleFunc("POST /webhooks/github/{tenant}", s.githubWebhook)
 	sc := s.scimAuth
 	mux.Handle("GET /scim/v2/ServiceProviderConfig", sc(s.scimConfig))
 	mux.Handle("GET /scim/v2/Users", sc(s.scimListUsers))
@@ -140,8 +146,43 @@ func (s *Server) Run(ctx context.Context) error {
 	} else {
 		s.log.Warn("central serving plain HTTP on loopback for local development only", "listen", s.cfg.Listen)
 	}
+	if s.cfg.EnvFile != "" {
+		s.loadEnvFile()
+		go envfile.Watch(ctx, 2*time.Second, s.loadEnvFile, func() []string { return []string{s.cfg.EnvFile} })
+	}
 	s.log.Info("central plane serving", "listen", s.cfg.Listen, "public_url", s.cfg.PublicURL)
 	return httpx.Serve(ctx, s.log, s.cfg.Listen, s.Handler(), tlsCfg, "", "")
+}
+
+// loadEnvFile picks up PRAVAHA_WEBHOOK_BASE_URL from the env file, so a new
+// tunnel or ingress address takes effect without a restart.
+func (s *Server) loadEnvFile() {
+	m, err := envfile.Read(s.cfg.EnvFile)
+	if err != nil {
+		s.log.Warn("reading env file failed", "file", s.cfg.EnvFile, "err", err)
+		return
+	}
+	v := strings.TrimRight(m["PRAVAHA_WEBHOOK_BASE_URL"], "/")
+	if u, err := url.Parse(v); v != "" && (err != nil || u.Scheme != "https" || u.Host == "" || u.Path != "") {
+		s.log.Warn("ignoring PRAVAHA_WEBHOOK_BASE_URL in env file: must be an https origin", "value", v)
+		return
+	}
+	if old, _ := s.hookBase.Load().(string); old != v {
+		s.hookBase.Store(v)
+		s.log.Info("webhook base URL", "url", v, "from", s.cfg.EnvFile)
+	}
+}
+
+// webhookBase is where Git hosts send webhooks: the env file, then the
+// environment, then the public URL.
+func (s *Server) webhookBase() string {
+	if v, _ := s.hookBase.Load().(string); v != "" {
+		return v
+	}
+	if s.cfg.WebhookBaseURL != "" {
+		return s.cfg.WebhookBaseURL
+	}
+	return s.cfg.PublicURL
 }
 
 // ---- auth ----

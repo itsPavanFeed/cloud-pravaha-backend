@@ -71,6 +71,10 @@ func (s *Server) putContracts(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 422, "invalid contracts repository", errLines(err)...)
 		return
 	}
+	if _, ok := s.githubAppConfig(r.Context()); c.Auth == "github_app" && !ok {
+		writeErr(w, 422, "invalid contracts repository", "configure the GitHub App under Integrations first")
+		return
+	}
 	if err := s.store.PutSetting(r.Context(), contractsKey, c, user(r).Subject); err != nil {
 		s.writeStoreErr(w, err, "")
 		return
@@ -168,13 +172,20 @@ func (s *Server) syncContracts(ctx context.Context, force bool) (*SyncStatus, er
 	}
 	var prev SyncStatus
 	s.store.Setting(ctx, contractsStatusKey, &prev)
-	src, err := contracts.New(*cfg, s.contractsToken(ctx), nil)
-	if err != nil {
-		return nil, err
-	}
+	var err error
 	fail := func(err error) (*SyncStatus, error) {
 		st := SyncStatus{Revision: prev.Revision, SyncedAt: time.Now(), Error: err.Error(), Results: prev.Results}
 		s.store.PutSetting(ctx, contractsStatusKey, st, "system:contracts")
+		return nil, err
+	}
+	token := s.contractsToken(ctx)
+	if cfg.Auth == "github_app" {
+		if token, err = s.githubInstallationToken(ctx, cfg.Repo); err != nil {
+			return fail(err)
+		}
+	}
+	src, err := contracts.New(*cfg, token, nil)
+	if err != nil {
 		return nil, err
 	}
 	rev, err := src.Revision(ctx)

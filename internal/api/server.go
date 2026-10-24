@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/assistant"
@@ -54,6 +55,8 @@ type Server struct {
 	assistant     *assistant.Assistant // nil = disabled
 	assistantDocs []assistant.Doc      // catalog, guide and runbooks
 	askLimiter    *httpx.Limiter
+	gh            ghCache                    // GitHub App with its token cache
+	ghSnap        atomic.Pointer[ghSettings] // GitHub App settings, reloaded on change
 }
 
 func New(cfg *config.Server, st *store.Store, cat *catalog.Catalog, sealer *secure.Sealer, iss *oidc.Issuer, log *slog.Logger) (*Server, error) {
@@ -66,6 +69,9 @@ func New(cfg *config.Server, st *store.Store, cat *catalog.Catalog, sealer *secu
 		askLimiter: httpx.NewLimiter(60, time.Hour, 15*time.Minute)}
 	if err := srv.enableAssistant(); err != nil {
 		return nil, err
+	}
+	if err := srv.ghReload(context.Background()); err != nil {
+		return nil, fmt.Errorf("loading GitHub App settings: %w", err)
 	}
 	if cfg.BucketURL != "" {
 		bc, err := blob.ParseURL(cfg.BucketURL, cfg.BucketAccessKey, cfg.BucketSecretKey)
@@ -136,6 +142,12 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /api/v1/settings/risk", u(s.putRiskSettings))
 	mux.Handle("GET /api/v1/assistant", u(s.assistantInfo))
 	mux.Handle("POST /api/v1/assistant/ask", u(s.askAssistant))
+	mux.Handle("GET /api/v1/integrations/github", u(s.getGitHubIntegration))
+	mux.Handle("PUT /api/v1/integrations/github", u(s.putGitHubIntegration))
+	mux.Handle("DELETE /api/v1/integrations/github", u(s.deleteGitHubIntegration))
+	mux.Handle("POST /api/v1/integrations/github/test", u(s.testGitHubIntegration))
+	mux.Handle("GET /api/v1/integrations/github/deliveries", u(s.listGitHubDeliveries))
+	mux.Handle("POST /api/v1/webhooks/github", s.authRelay(s.githubWebhook))
 	mux.Handle("GET /api/v1/runners", u(s.listRunners))
 	mux.Handle("POST /api/v1/runners", u(s.createRunner))
 	mux.Handle("DELETE /api/v1/runners/{id}", u(s.revokeRunner))
@@ -187,6 +199,7 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	go s.reaper(ctx)
 	go s.contractsSyncer(ctx)
+	go s.ghWatch(ctx)
 	s.log.Info("tenant plane serving HTTPS", "tenant", s.cfg.Tenant, "listen", s.cfg.Listen, "central", s.cfg.CentralURL)
 	return httpx.Serve(ctx, s.log, s.cfg.Listen, s.Handler(), tlsCfg, "", "")
 }
