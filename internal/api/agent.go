@@ -191,7 +191,7 @@ func (s *Server) agentPlan(w http.ResponseWriter, r *http.Request) {
 		s.recordDrift(w, r, run, st, up)
 		return
 	}
-	res := policy.Evaluate(up.Summary, policy.Limits{MaxDestroys: env.MaxDestroys, AllowDestroy: env.AllowDestroy, Destroying: run.Operation == "destroy"})
+	res := policy.Evaluate(up.Summary, policy.Limits{MaxDestroys: env.MaxDestroys, MaxCreates: env.MaxCreates, MaxImports: env.MaxImports, AllowDestroy: env.AllowDestroy, Destroying: run.Operation == "destroy"})
 	if sets := s.tenantPolicies(ctx, run); len(sets) > 0 {
 		for _, v := range opapolicy.Evaluate(ctx, sets, s.policyInput(run, env, up.Summary)) {
 			res.Violations = append(res.Violations, v)

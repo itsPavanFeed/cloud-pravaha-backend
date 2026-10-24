@@ -201,6 +201,8 @@ type Environment struct {
 	Cloud        json.RawMessage `json:"cloud"`
 	RunnerPool   string          `json:"runner_pool"`
 	MaxDestroys  int             `json:"max_destroys"`
+	MaxCreates   int             `json:"max_creates"` // per run; 0 = no limit
+	MaxImports   int             `json:"max_imports"` // per run; 0 = no limit
 	AllowDestroy bool            `json:"allow_destroy"`
 	CreatedBy    string          `json:"created_by"`
 	CreatedAt    time.Time       `json:"created_at"`
@@ -208,19 +210,19 @@ type Environment struct {
 }
 
 const envSelect = `SELECT e.id, e.name, e.entity, e.tier, e.connection_id, COALESCE(c.name, ''),
-	COALESCE(c.cloud, '{"provider":"none"}'::jsonb), e.runner_pool, e.max_destroys, e.allow_destroy, e.created_by, e.created_at, e.updated_at
+	COALESCE(c.cloud, '{"provider":"none"}'::jsonb), e.runner_pool, e.max_destroys, e.max_creates, e.max_imports, e.allow_destroy, e.created_by, e.created_at, e.updated_at
 	FROM environments e LEFT JOIN cloud_connections c ON c.id = e.connection_id`
 
 func scanEnv(r pgx.Row) (*Environment, error) {
 	var e Environment
-	err := r.Scan(&e.ID, &e.Name, &e.Entity, &e.Tier, &e.ConnectionID, &e.Connection, &e.Cloud, &e.RunnerPool, &e.MaxDestroys, &e.AllowDestroy, &e.CreatedBy, &e.CreatedAt, &e.UpdatedAt)
+	err := r.Scan(&e.ID, &e.Name, &e.Entity, &e.Tier, &e.ConnectionID, &e.Connection, &e.Cloud, &e.RunnerPool, &e.MaxDestroys, &e.MaxCreates, &e.MaxImports, &e.AllowDestroy, &e.CreatedBy, &e.CreatedAt, &e.UpdatedAt)
 	return &e, NotFound(err)
 }
 
 func (s *Store) CreateEnvironment(ctx context.Context, e *Environment) (*Environment, error) {
 	var id string
-	err := s.db.QueryRow(ctx, `INSERT INTO environments (name, entity, tier, connection_id, runner_pool, max_destroys, allow_destroy, created_by)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`, e.Name, e.Entity, e.Tier, e.ConnectionID, e.RunnerPool, e.MaxDestroys, e.AllowDestroy, e.CreatedBy).Scan(&id)
+	err := s.db.QueryRow(ctx, `INSERT INTO environments (name, entity, tier, connection_id, runner_pool, max_destroys, max_creates, max_imports, allow_destroy, created_by)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`, e.Name, e.Entity, e.Tier, e.ConnectionID, e.RunnerPool, e.MaxDestroys, e.MaxCreates, e.MaxImports, e.AllowDestroy, e.CreatedBy).Scan(&id)
 	if IsUnique(err) {
 		return nil, ErrConflict
 	}
@@ -231,8 +233,8 @@ func (s *Store) CreateEnvironment(ctx context.Context, e *Environment) (*Environ
 }
 
 func (s *Store) UpdateEnvironment(ctx context.Context, e *Environment) (*Environment, error) {
-	tag, err := s.db.Exec(ctx, `UPDATE environments SET tier = $2, connection_id = $3, runner_pool = $4, max_destroys = $5, allow_destroy = $6, updated_at = now()
-		WHERE id = $1`, e.ID, e.Tier, e.ConnectionID, e.RunnerPool, e.MaxDestroys, e.AllowDestroy)
+	tag, err := s.db.Exec(ctx, `UPDATE environments SET tier = $2, connection_id = $3, runner_pool = $4, max_destroys = $5, allow_destroy = $6,
+		max_creates = $7, max_imports = $8, updated_at = now() WHERE id = $1`, e.ID, e.Tier, e.ConnectionID, e.RunnerPool, e.MaxDestroys, e.AllowDestroy, e.MaxCreates, e.MaxImports)
 	if err == nil && tag.RowsAffected() == 0 {
 		return nil, ErrNotFound
 	}

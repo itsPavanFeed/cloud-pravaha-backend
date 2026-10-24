@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -94,6 +95,7 @@ type Runner struct {
 	WorkRoot    string
 	PluginCache string
 	Name        string
+	Concurrency int // runs executed at the same time, each in its own work and temp directories
 }
 
 // DefaultTofuVersion is the OpenTofu release runs are pinned to unless overridden.
@@ -250,6 +252,7 @@ func LoadRunner() (*Runner, error) {
 		WorkRoot:    os.Getenv("PRAVAHA_WORK_DIR"),
 		PluginCache: os.Getenv("PRAVAHA_PLUGIN_CACHE_DIR"),
 		Name:        env("PRAVAHA_RUNNER_NAME", hostname()),
+		Concurrency: atoiDefault(os.Getenv("PRAVAHA_RUNNER_CONCURRENCY"), 2),
 	}
 	var errs []error
 	u, err := url.Parse(c.ServerURL)
@@ -263,6 +266,9 @@ func LoadRunner() (*Runner, error) {
 	}
 	if len(c.StateKey) < 32 {
 		errs = append(errs, errors.New("PRAVAHA_STATE_KEY must be at least 32 characters; every runner in a pool must share it"))
+	}
+	if c.Concurrency < 1 || c.Concurrency > 16 {
+		errs = append(errs, errors.New("PRAVAHA_RUNNER_CONCURRENCY must be between 1 and 16"))
 	}
 	return c, errors.Join(errs...)
 }
@@ -308,4 +314,15 @@ func absPath(p string) string {
 		return a
 	}
 	return p
+}
+
+func atoiDefault(v string, def int) int {
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return -1 // reported by validation
+	}
+	return n
 }

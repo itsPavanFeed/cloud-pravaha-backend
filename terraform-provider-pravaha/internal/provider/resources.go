@@ -405,6 +405,8 @@ type envModel struct {
 	Connection   types.String `tfsdk:"cloud_connection"`
 	RunnerPool   types.String `tfsdk:"runner_pool"`
 	MaxDestroys  types.Int64  `tfsdk:"max_destroys"`
+	MaxCreates   types.Int64  `tfsdk:"max_creates"`
+	MaxImports   types.Int64  `tfsdk:"max_imports"`
 	AllowDestroy types.Bool   `tfsdk:"allow_destroy"`
 }
 
@@ -425,6 +427,8 @@ func (r *envRes) Schema(_ context.Context, _ resource.SchemaRequest, resp *resou
 			"cloud_connection": schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString(""), Description: "Cloud connection name. Empty means no cloud."},
 			"runner_pool":      schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString("default")},
 			"max_destroys":     schema.Int64Attribute{Optional: true, Computed: true, Default: int64default.StaticInt64(0), Description: "Maximum resources a run may delete or replace."},
+			"max_creates":      schema.Int64Attribute{Optional: true, Computed: true, Default: int64default.StaticInt64(0), Description: "Maximum resources a run may create (0 = no limit)."},
+			"max_imports":      schema.Int64Attribute{Optional: true, Computed: true, Default: int64default.StaticInt64(0), Description: "Maximum resources a run may import (0 = no limit)."},
 			"allow_destroy":    schema.BoolAttribute{Optional: true, Computed: true, Default: booldefault.StaticBool(false), Description: "Allow destroy runs."},
 		},
 	}
@@ -433,7 +437,7 @@ func (r *envRes) Schema(_ context.Context, _ resource.SchemaRequest, resp *resou
 func (r *envRes) save(ctx context.Context, m *envModel, d *diag.Diagnostics, create bool) {
 	md := m.MaxDestroys.ValueInt64()
 	body := Environment{Name: m.Name.ValueString(), Entity: m.Entity.ValueString(), Tier: m.Tier.ValueString(), Connection: m.Connection.ValueString(),
-		RunnerPool: m.RunnerPool.ValueString(), MaxDestroys: &md, AllowDestroy: m.AllowDestroy.ValueBool()}
+		RunnerPool: m.RunnerPool.ValueString(), MaxDestroys: &md, MaxCreates: m.MaxCreates.ValueInt64(), MaxImports: m.MaxImports.ValueInt64(), AllowDestroy: m.AllowDestroy.ValueBool()}
 	var out Environment
 	var err error
 	if create {
@@ -491,6 +495,7 @@ func (r *envRes) Read(ctx context.Context, req resource.ReadRequest, resp *resou
 	if e.MaxDestroys != nil {
 		m.MaxDestroys = types.Int64Value(*e.MaxDestroys)
 	}
+	m.MaxCreates, m.MaxImports = types.Int64Value(e.MaxCreates), types.Int64Value(e.MaxImports)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &m)...)
 }
 

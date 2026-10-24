@@ -34,3 +34,16 @@ func TestImportThatDestroys(t *testing.T) {
 		t.Fatalf("an import that destroys the adopted resource must be blocked: %+v", r)
 	}
 }
+
+func TestCreateAndImportLimits(t *testing.T) {
+	s := Summary{Add: 5, Imports: 3}
+	if r := Evaluate(s, Limits{MaxCreates: 4, MaxImports: 3}); r.Passed || len(r.Violations) != 1 || r.Violations[0].Rule != "create-limit" {
+		t.Fatalf("%+v", r)
+	}
+	if r := Evaluate(s, Limits{MaxImports: 2}); r.Passed || r.Violations[0].Rule != "import-limit" {
+		t.Fatalf("%+v", r)
+	}
+	if r := Evaluate(s, Limits{}); !r.Passed {
+		t.Fatalf("0 means no limit: %+v", r)
+	}
+}

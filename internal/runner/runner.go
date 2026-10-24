@@ -47,6 +47,7 @@ type Runner struct {
 	caPEM    string
 	pinned   *catalog.Catalog // a locally pinned catalog overrides the one in jobs
 	tofuPath string
+	initMu   sync.Mutex // tofu init shares the provider plugin cache; inits run one at a time
 }
 
 func New(cfg *config.Runner, log *slog.Logger) (*Runner, error) {
@@ -84,17 +85,28 @@ func New(cfg *config.Runner, log *slog.Logger) (*Runner, error) {
 	return r, nil
 }
 
-// Run polls for work until ctx is cancelled. One job at a time; scale by
-// running more runners in the pool.
+// Run polls for work until ctx is cancelled, executing up to Concurrency runs
+// at once. Each run gets its own work directory and TMPDIR, removed when it
+// ends, so concurrent runs never share files. Scale further with more runners.
 func (r *Runner) Run(ctx context.Context) error {
-	r.log.Info("runner started", "server", r.cfg.ServerURL, "tofu", r.tofuPath)
+	n := max(r.cfg.Concurrency, 1)
+	r.log.Info("runner started", "server", r.cfg.ServerURL, "tofu", r.tofuPath, "concurrency", n)
+	slots := make(chan struct{}, n)
+	var wg sync.WaitGroup
+	defer wg.Wait() // let running jobs finish reporting
 	backoff := time.Second
 	for ctx.Err() == nil {
+		select { // claim only when a slot is free
+		case slots <- struct{}{}:
+		case <-ctx.Done():
+			return nil
+		}
 		job, err := r.claim(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
 				break
 			}
+			<-slots
 			r.log.Warn("claim failed", "err", err, "retry_in", backoff)
 			sleep(ctx, backoff)
 			backoff = min(backoff*2, time.Minute)
@@ -102,9 +114,14 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 		backoff = time.Second
 		if job == nil {
+			<-slots
 			continue
 		}
-		r.execute(ctx, job)
+		wg.Add(1)
+		go func() {
+			defer func() { <-slots; wg.Done() }()
+			r.execute(ctx, job)
+		}()
 	}
 	return nil
 }
@@ -223,7 +240,9 @@ func (j *job) run(ctx context.Context, passphrase string) (err error) {
 	j.logs.Printf("==> tofu init (OpenTofu %s, %d allowlisted providers)\n", j.TofuVersion, len(j.Providers))
 	// init is idempotent; retry transient registry and network failures.
 	for attempt := 1; ; attempt++ {
+		j.r.initMu.Lock()
 		err := j.tofu(ctx, "init", "-input=false", "-no-color")
+		j.r.initMu.Unlock()
 		if err == nil {
 			break
 		}

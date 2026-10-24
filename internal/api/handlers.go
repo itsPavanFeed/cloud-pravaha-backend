@@ -51,6 +51,8 @@ type envBody struct {
 	Connection   string `json:"connection"` // cloud connection name; "" = no cloud
 	RunnerPool   string `json:"runner_pool"`
 	MaxDestroys  *int   `json:"max_destroys"`
+	MaxCreates   int    `json:"max_creates"` // per run; 0 = no limit
+	MaxImports   int    `json:"max_imports"` // per run; 0 = no limit
 	AllowDestroy bool   `json:"allow_destroy"`
 }
 
@@ -70,6 +72,9 @@ func (b *envBody) validate(create bool) []string {
 	}
 	if b.MaxDestroys == nil || *b.MaxDestroys < 0 || *b.MaxDestroys > 1000 {
 		probs = append(probs, "max_destroys must be between 0 and 1000")
+	}
+	if b.MaxCreates < 0 || b.MaxCreates > 10000 || b.MaxImports < 0 || b.MaxImports > 10000 {
+		probs = append(probs, "max_creates and max_imports must be between 0 (no limit) and 10000")
 	}
 	return probs
 }
@@ -144,7 +149,7 @@ func (s *Server) createEnvironment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	e, err := s.store.CreateEnvironment(r.Context(), &store.Environment{Name: b.Name, Entity: b.Entity, Tier: b.Tier, ConnectionID: connID,
-		RunnerPool: b.RunnerPool, MaxDestroys: *b.MaxDestroys, AllowDestroy: b.AllowDestroy, CreatedBy: p.Subject})
+		RunnerPool: b.RunnerPool, MaxDestroys: *b.MaxDestroys, MaxCreates: b.MaxCreates, MaxImports: b.MaxImports, AllowDestroy: b.AllowDestroy, CreatedBy: p.Subject})
 	if err != nil {
 		s.writeStoreErr(w, err, "the entity already has an environment with that name")
 		return
@@ -179,7 +184,7 @@ func (s *Server) updateEnvironment(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	e, err := s.store.UpdateEnvironment(r.Context(), &store.Environment{ID: cur.ID, Tier: b.Tier, ConnectionID: connID, RunnerPool: b.RunnerPool, MaxDestroys: *b.MaxDestroys, AllowDestroy: b.AllowDestroy})
+	e, err := s.store.UpdateEnvironment(r.Context(), &store.Environment{ID: cur.ID, Tier: b.Tier, ConnectionID: connID, RunnerPool: b.RunnerPool, MaxDestroys: *b.MaxDestroys, MaxCreates: b.MaxCreates, MaxImports: b.MaxImports, AllowDestroy: b.AllowDestroy})
 	if err != nil {
 		s.writeStoreErr(w, err, "")
 		return

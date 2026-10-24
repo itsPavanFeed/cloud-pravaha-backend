@@ -48,6 +48,8 @@ type Result struct {
 // Limits come from the environment.
 type Limits struct {
 	MaxDestroys  int  // deletes (including replacements) allowed in one run
+	MaxCreates   int  // resources one run may create (0 = no limit)
+	MaxImports   int  // resources one run may import (0 = no limit)
 	AllowDestroy bool // whether destroy runs are allowed at all
 	Destroying   bool // this run is a destroy run
 }
@@ -72,6 +74,14 @@ func Evaluate(s Summary, l Limits) Result {
 	if !l.Destroying && deletes > l.MaxDestroys {
 		v = append(v, Violation{Rule: "destroy-limit", Level: "hard",
 			Message: fmt.Sprintf("plan deletes %d resources; this environment allows at most %d per run", deletes, l.MaxDestroys)})
+	}
+	if l.MaxCreates > 0 && s.Add > l.MaxCreates {
+		v = append(v, Violation{Rule: "create-limit", Level: "hard",
+			Message: fmt.Sprintf("plan creates %d resources; this environment allows at most %d per run", s.Add, l.MaxCreates)})
+	}
+	if l.MaxImports > 0 && s.Imports > l.MaxImports {
+		v = append(v, Violation{Rule: "import-limit", Level: "hard",
+			Message: fmt.Sprintf("plan imports %d resources; this environment allows at most %d per run", s.Imports, l.MaxImports)})
 	}
 	for _, r := range s.Resources {
 		if r.Importing && has(r.Actions, "delete") {

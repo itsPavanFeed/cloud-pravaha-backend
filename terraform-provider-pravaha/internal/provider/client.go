@@ -147,6 +147,8 @@ type Environment struct {
 	Connection   string `json:"connection"`
 	RunnerPool   string `json:"runner_pool"`
 	MaxDestroys  *int64 `json:"max_destroys"`
+	MaxCreates   int64  `json:"max_creates"`
+	MaxImports   int64  `json:"max_imports"`
 	AllowDestroy bool   `json:"allow_destroy"`
 }
 

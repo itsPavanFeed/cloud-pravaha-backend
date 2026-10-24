@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -251,18 +252,54 @@ func (s *Server) testGitHubIntegration(w http.ResponseWriter, r *http.Request) {
 		cfg.AppSlug = info.Slug
 		s.ghSave(ctx, *cfg, nil, nil, "system:github")
 	}
-	need := map[string]string{"contents": "read", "metadata": "read", "pull_requests": "write", "checks": "write"}
-	var missing []string
-	for p, lvl := range need {
-		got := info.Permissions[p]
-		if got == "" || (lvl == "write" && got != "write") {
-			missing = append(missing, p+":"+lvl)
+	// What the installation actually granted is what counts: after an app's
+	// permissions change, each installation's owner must accept the update.
+	granted := info.Permissions
+	if insts, err := app.Installations(ctx); err == nil {
+		for _, i := range insts {
+			if cfg.InstallationID == 0 || i.ID == cfg.InstallationID {
+				granted = i.Permissions
+				break
+			}
 		}
 	}
-	if len(missing) == 0 {
-		add("Permissions", "ok", "contents, metadata, pull requests and checks")
-	} else {
-		add("Permissions", "warn", "missing "+strings.Join(missing, ", ")+" (contents:read is required for contracts; pull requests and checks are for pull-request plans)")
+	level := map[string]int{"": 0, "read": 1, "write": 2, "admin": 3}
+	need := []struct{ perm, lvl, why string }{
+		{"metadata", "read", "required"},
+		{"contents", "write", "contracts (read) and self-service pull requests (write)"},
+		{"pull_requests", "write", "pull-request plans: comments and merge after apply"},
+		{"statuses", "write", "pull-request plans: the pravaha/apply status"},
+	}
+	var missing []string
+	for _, n := range need {
+		if level[granted[n.perm]] < level[n.lvl] {
+			missing = append(missing, fmt.Sprintf("%s:%s (%s)", n.perm, n.lvl, n.why))
+		}
+	}
+	var pending []string
+	for p, l := range info.Permissions {
+		if level[granted[p]] < level[l] {
+			pending = append(pending, p+":"+l)
+		}
+	}
+	switch {
+	case len(missing) > 0:
+		add("Permissions", "fail", "the installation lacks "+strings.Join(missing, "; "))
+	default:
+		add("Permissions", "ok", "metadata, contents (write), pull requests (write), statuses (write)")
+	}
+	if len(pending) > 0 {
+		sort.Strings(pending)
+		add("Pending permission update", "warn", "the app asks for "+strings.Join(pending, ", ")+" but the installation has not accepted them; the organisation owner can approve the request under Settings → GitHub Apps")
+	}
+	var extra []string
+	for _, p := range []string{"repository_hooks", "administration", "secrets", "actions", "workflows", "organization_administration"} {
+		if granted[p] != "" {
+			extra = append(extra, p+":"+granted[p])
+		}
+	}
+	if len(extra) > 0 {
+		add("Least privilege", "warn", "the platform does not need "+strings.Join(extra, ", ")+"; remove them from the app")
 	}
 	events := map[string]bool{}
 	for _, e := range info.Events {
