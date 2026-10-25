@@ -52,16 +52,16 @@ type Server struct {
 	wakeMu  sync.Mutex
 	wake    chan struct{} // closed to nudge long-polling runners when work is queued
 
-	assistant     *assistant.Assistant // nil = disabled
+	assistant      *assistant.Assistant            // nil = disabled
 	assistantDocs  atomic.Pointer[[]assistant.Doc] // catalog, guide and runbooks
 	assistantExtra []assistant.Doc                 // runbooks from PRAVAHA_ASSISTANT_DOCS_DIR
-	askLimiter    *httpx.Limiter
-	gh            ghCache                           // GitHub App with its token cache
-	ghSnap        atomic.Pointer[ghSettings]        // GitHub App settings, reloaded on change
-	dirSnap       atomic.Pointer[map[string]string] // business unit → entity, learned from central
-	slackSnap     atomic.Pointer[slackSettings]     // Slack incoming webhook, reloaded on change
-	platSnap      atomic.Pointer[platform]          // catalog, tenant defaults and deployed module release
-	bundles       *bundlecache.Cache                // release bundles: memory, then disk, then the database or bucket
+	askLimiter     *httpx.Limiter
+	gh             ghCache                           // GitHub App with its token cache
+	ghSnap         atomic.Pointer[ghSettings]        // GitHub App settings, reloaded on change
+	dirSnap        atomic.Pointer[map[string]string] // business unit → entity, learned from central
+	slackSnap      atomic.Pointer[slackSettings]     // Slack incoming webhook, reloaded on change
+	platSnap       atomic.Pointer[platform]          // catalog, tenant defaults and deployed module release
+	bundles        *bundlecache.Cache                // release bundles: memory, then disk, then the database or bucket
 }
 
 func New(cfg *config.Server, st *store.Store, cat *catalog.Catalog, sealer *secure.Sealer, iss *oidc.Issuer, log *slog.Logger) (*Server, error) {

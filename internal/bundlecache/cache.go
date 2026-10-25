@@ -39,7 +39,7 @@ type Cache struct {
 	byKey map[string]*list.Element
 	used  int64
 
-	group                           singleflight.Group
+	group                          singleflight.Group
 	memHits, diskHits, originLoads atomic.Int64
 }
 

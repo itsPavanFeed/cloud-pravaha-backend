@@ -25,13 +25,13 @@ import (
 	"time"
 
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/api"
+	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/bundlecache"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/catalog"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/config"
-	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/bundlecache"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/depcheck"
-	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/release"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/policy"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/redact"
+	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/release"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/secure"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/spec"
 )
@@ -49,7 +49,7 @@ type Runner struct {
 	caPEM    string
 	pinned   *catalog.Catalog // a locally pinned catalog overrides the one in jobs
 	tofuPath string
-	initMu   sync.Mutex // tofu init shares the provider plugin cache; inits run one at a time
+	initMu   sync.Mutex         // tofu init shares the provider plugin cache; inits run one at a time
 	bundles  *bundlecache.Cache // module release bundles, by checksum
 }
 

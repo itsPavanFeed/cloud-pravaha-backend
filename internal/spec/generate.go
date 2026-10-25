@@ -58,9 +58,9 @@ type Generated struct {
 	// Their checksums are part of the config, so a plan is stale only when
 	// the modules this stack loads actually change.
 	Vendored map[string]string `json:"vendored,omitempty"`
-	Secrets   bool              `json:"secrets,omitempty"` // runs need a Vault login token
-	Hash      string            `json:"hash"`              // sha256 over every file; changes make saved plans stale
-	Spec      json.RawMessage   `json:"-"`                 // the normalized spec (kinds and versions filled in)
+	Secrets  bool              `json:"secrets,omitempty"` // runs need a Vault login token
+	Hash     string            `json:"hash"`              // sha256 over every file; changes make saved plans stale
+	Spec     json.RawMessage   `json:"-"`                 // the normalized spec (kinds and versions filled in)
 }
 
 // Generate produces the OpenTofu configuration for a validated stack.

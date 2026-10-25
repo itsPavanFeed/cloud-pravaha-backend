@@ -59,8 +59,8 @@ type Server struct {
 
 	// Release bundles (vendored modules) are cached in memory and on disk so
 	// the database or bucket holding them is read once per bundle.
-	BundleCacheDir string
-	BundleCacheMem int64 // bytes
+	BundleCacheDir  string
+	BundleCacheMem  int64 // bytes
 	BundleCacheDisk int64
 	// RegistryURL is where module builds download packages; a private mirror
 	// of registry.opentofu.org may be used. Default: the public registry.
@@ -271,17 +271,17 @@ func common(db, key, public string, insecure bool) []error {
 
 func LoadRunner() (*Runner, error) {
 	c := &Runner{
-		ServerURL:   strings.TrimRight(os.Getenv("PRAVAHA_SERVER_URL"), "/"),
-		Token:       secret("PRAVAHA_RUNNER_TOKEN"),
-		StateKey:    secret("PRAVAHA_STATE_KEY"),
-		CAFile:      os.Getenv("PRAVAHA_CA_FILE"),
-		TofuPath:    env("PRAVAHA_TOFU_PATH", "tofu"),
-		WorkRoot:    os.Getenv("PRAVAHA_WORK_DIR"),
-		PluginCache: os.Getenv("PRAVAHA_PLUGIN_CACHE_DIR"),
+		ServerURL:       strings.TrimRight(os.Getenv("PRAVAHA_SERVER_URL"), "/"),
+		Token:           secret("PRAVAHA_RUNNER_TOKEN"),
+		StateKey:        secret("PRAVAHA_STATE_KEY"),
+		CAFile:          os.Getenv("PRAVAHA_CA_FILE"),
+		TofuPath:        env("PRAVAHA_TOFU_PATH", "tofu"),
+		WorkRoot:        os.Getenv("PRAVAHA_WORK_DIR"),
+		PluginCache:     os.Getenv("PRAVAHA_PLUGIN_CACHE_DIR"),
 		BundleCacheDir:  os.Getenv("PRAVAHA_BUNDLE_CACHE_DIR"),
 		BundleCacheDisk: int64(envInt("PRAVAHA_BUNDLE_CACHE_DISK_MB", 1024)) << 20,
-		Name:        env("PRAVAHA_RUNNER_NAME", hostname()),
-		Concurrency: atoiDefault(os.Getenv("PRAVAHA_RUNNER_CONCURRENCY"), 2),
+		Name:            env("PRAVAHA_RUNNER_NAME", hostname()),
+		Concurrency:     atoiDefault(os.Getenv("PRAVAHA_RUNNER_CONCURRENCY"), 2),
 	}
 	var errs []error
 	u, err := url.Parse(c.ServerURL)

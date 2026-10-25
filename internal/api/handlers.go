@@ -257,7 +257,6 @@ func (s *Server) buildWith(ctx context.Context, p *platform, stackName, bu strin
 	return gen, c, nil
 }
 
-
 // visibleEnv loads an environment the caller can see, or answers 422.
 // target resolves where a stack goes: its business unit and an environment of
 // that BU's entity. Without a bu, the caller's only writable BU in the
