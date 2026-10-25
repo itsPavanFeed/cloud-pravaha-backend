@@ -8,7 +8,8 @@
 //     through signals (planned, approved, finished) and owns its timers: a
 //     runner that stops reporting fails the run, a plan nobody approves in time
 //     is discarded, an apply that never finishes fails. Drift checks are queued
-//     by a Temporal cron workflow. Runs are visible in the Temporal UI.
+//     Runs are visible in the Temporal UI. Drift checks are only ever started
+//     by people; nothing is scheduled.
 //
 // Either way the database stays the source of truth: workflow activities apply
 // guarded, idempotent status changes, so a late signal or a duplicate timer
@@ -57,8 +58,6 @@ var DefaultTimeouts = Timeouts{Planning: 30 * time.Minute, Approval: 24 * time.H
 type Store interface {
 	// Expire moves a run out of one of the given statuses; false if it had already moved on.
 	Expire(ctx context.Context, runID string, from []string, to, reason string) (bool, error)
-	// QueueDueDrift queues refresh-only runs for stacks whose check is due and returns their run IDs.
-	QueueDueDrift(ctx context.Context) ([]string, error)
 }
 
 // ---- workflows ----
@@ -136,14 +135,6 @@ func RunLifecycle(ctx workflow.Context, in RunInput) (string, error) {
 	return "applied or failed", nil
 }
 
-// DriftSweep is run by a Temporal cron schedule to queue due drift checks.
-func DriftSweep(ctx workflow.Context) ([]string, error) {
-	ctx = workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: time.Minute})
-	var ids []string
-	err := workflow.ExecuteActivity(ctx, (*Activities).QueueDueDrift).Get(ctx, &ids)
-	return ids, err
-}
-
 // ---- activities ----
 
 type Activities struct {
@@ -154,14 +145,6 @@ type Activities struct {
 func (a *Activities) Expire(ctx context.Context, runID string, from []string, to, reason string) (bool, error) {
 	activity.GetLogger(ctx).Info("expiring run", "run", runID, "to", to, "reason", reason)
 	return a.Store.Expire(ctx, runID, from, to, reason)
-}
-
-func (a *Activities) QueueDueDrift(ctx context.Context) ([]string, error) {
-	ids, err := a.Store.QueueDueDrift(ctx)
-	if err == nil && len(ids) > 0 && a.OnQueue != nil {
-		a.OnQueue(ctx, ids)
-	}
-	return ids, err
 }
 
 // ---- the Temporal engine ----
@@ -196,7 +179,6 @@ func NewTemporal(cfg TemporalConfig, acts *Activities, logf func(string, ...any)
 		if c, err = client.Dial(client.Options{HostPort: cfg.Address, Namespace: cfg.Namespace}); err == nil {
 			w = worker.New(c, cfg.TaskQueue, worker.Options{})
 			w.RegisterWorkflow(RunLifecycle)
-			w.RegisterWorkflow(DriftSweep)
 			w.RegisterActivity(acts)
 			if err = w.Start(); err == nil {
 				break
@@ -212,14 +194,11 @@ func NewTemporal(cfg TemporalConfig, acts *Activities, logf func(string, ...any)
 		time.Sleep(3 * time.Second)
 	}
 	t := &Temporal{c: c, w: w, taskQueue: cfg.TaskQueue, timeouts: cfg.Timeouts, log: logf}
-	// Drift sweeps every minute; the cron workflow ID is fixed so replicas share it.
-	_, err = c.ExecuteWorkflow(context.Background(), client.StartWorkflowOptions{
-		ID: "drift-sweep-" + cfg.TaskQueue, TaskQueue: cfg.TaskQueue, CronSchedule: "* * * * *",
-	}, DriftSweep)
-	if err != nil && !isAlreadyStarted(err) {
-		t.Close()
-		return nil, err
-	}
+	// Drift checks are started by people, never on a schedule. Stop the cron
+	// workflow earlier versions started, so it no longer fires every minute.
+	tctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	c.TerminateWorkflow(tctx, "drift-sweep-"+cfg.TaskQueue, "", "drift checks are manual")
 	return t, nil
 }
 

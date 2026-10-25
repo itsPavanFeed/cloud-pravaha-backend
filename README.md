@@ -246,7 +246,7 @@ Imports raise risk to at least medium. A new hard policy rule, `import-destroys`
 
 A drift run (`{"operation":"drift"}`) is a refresh-only plan. It compares real infrastructure with state and ends as `no_drift` or `drifted`, listing the resources changed outside OpenTofu. It never changes anything and needs no approvals.
 
-Each stack can schedule checks (`PUT /stacks/{id}/drift` with `{"interval_minutes": 60, "auto_remediate": true}`; minimum 5 minutes). With auto-remediation, a drifted check queues a normal plan, which still goes through the risk-based approval chain.
+Drift checks are **manual**: nothing schedules them and nothing remediates on its own. When a check finds drift, the person decides on its result page: **code → live** (plan an apply of the current stack or contract, which goes through the usual approvals) or **live → code** (update the stack or its contract so it matches the live resources, then plan it; the plan should show no changes).
 
 ## Assistant (LLM with RAG)
 
@@ -380,7 +380,7 @@ SCIM 2.0 lives at `<central>/scim/v2`; create its bearer token with `pravaha cen
 | `PRAVAHA_CENTRAL_CA_FILE`, `PRAVAHA_CENTRAL_JWKS_FILE` | Optional: CA for central's TLS; a static JWKS instead of fetching it |
 | `PRAVAHA_CATALOG_DIR`, `PRAVAHA_TOFU_VERSION` | Catalog directory; exact OpenTofu version (default `1.13.2`) |
 | `PRAVAHA_BUCKET_URL` | Optional tenant bucket for state versions and saved plans: `s3://bucket[/prefix]?endpoint=https://…&region=…` (AWS S3, MinIO, Ceph, SeaweedFS, GCS interoperability). The database then keeps only keys and checksums |
-| `PRAVAHA_TEMPORAL_ADDRESS`, `PRAVAHA_TEMPORAL_NAMESPACE` | Optional Temporal frontend (`host:7233`) and namespace. With it, each run is a durable workflow `run-<id>` that owns its timers (planning silence, approval expiry, apply timeout), and drift checks come from a cron workflow on task queue `pravaha-<tenant>`. Without it, the built-in database reaper and scheduler do the same |
+| `PRAVAHA_TEMPORAL_ADDRESS`, `PRAVAHA_TEMPORAL_NAMESPACE` | Optional Temporal frontend (`host:7233`) and namespace. With it, each run is a durable workflow `run-<id>` that owns its timers (planning silence, approval expiry, apply timeout) on task queue `pravaha-<tenant>`; nothing runs on a schedule. Without it, the built-in database reaper does the same |
 | `PRAVAHA_BUCKET_ACCESS_KEY`, `PRAVAHA_BUCKET_SECRET_KEY` | Bucket credentials (use `_FILE` variants); `PRAVAHA_BUCKET_CREATE=1` creates the bucket on start |
 | `PRAVAHA_ASSISTANT_API_KEY` | Optional Anthropic API key (use `_FILE`). Setting it enables the assistant |
 | `PRAVAHA_ASSISTANT_MODEL`, `PRAVAHA_ASSISTANT_EFFORT` | Model (default `claude-opus-5-5`) and effort (`low`…`max`, default `medium`) |

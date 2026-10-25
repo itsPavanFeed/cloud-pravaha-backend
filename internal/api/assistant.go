@@ -160,9 +160,6 @@ func (s *Server) assistantCorpus(ctx context.Context, r *http.Request) (*assista
 			lr, _ := json.Marshal(st.LastRun)
 			fmt.Fprintf(&b, " Last run: %s.", lr)
 		}
-		if st.Drift.IntervalMinutes > 0 {
-			fmt.Fprintf(&b, " Drift checks every %d minutes (auto-remediate: %v).", st.Drift.IntervalMinutes, st.Drift.AutoRemediate)
-		}
 		fmt.Fprintf(&b, "\nSpec: %s", st.Spec)
 		docs = append(docs, assistant.Doc{ID: "stack:" + st.Name, Kind: "stack", Title: "Stack " + st.Name, Text: b.String()})
 	}

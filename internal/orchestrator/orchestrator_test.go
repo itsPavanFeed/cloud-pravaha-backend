@@ -14,7 +14,6 @@ func (f *fakeStore) Expire(_ context.Context, runID string, from []string, to, r
 	f.expired = append(f.expired, to+":"+reason)
 	return true, nil
 }
-func (f *fakeStore) QueueDueDrift(context.Context) ([]string, error) { return []string{"r1"}, nil }
 
 var to = Timeouts{Planning: 10 * time.Minute, Approval: time.Hour, Applying: 30 * time.Minute}
 
@@ -69,16 +68,5 @@ func TestRunLifecycle(t *testing.T) {
 	})
 	if len(fs.expired) != 0 {
 		t.Fatalf("terminal plans must not expire: %v", fs.expired)
-	}
-}
-
-func TestDriftSweep(t *testing.T) {
-	var s testsuite.WorkflowTestSuite
-	env := s.NewTestWorkflowEnvironment()
-	env.RegisterActivity(&Activities{Store: &fakeStore{}})
-	env.ExecuteWorkflow(DriftSweep)
-	var ids []string
-	if env.GetWorkflowError() != nil || env.GetWorkflowResult(&ids) != nil || len(ids) != 1 {
-		t.Fatalf("drift sweep: %v %v", env.GetWorkflowError(), ids)
 	}
 }

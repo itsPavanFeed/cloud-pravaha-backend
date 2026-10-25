@@ -54,7 +54,7 @@ To bring existing cloud resources under management, add `imports` to a stack. Ea
 
 ## Drift
 
-Stacks can schedule drift checks: refresh-only plans that compare real infrastructure with state. Drift is shown on the stack. With auto-remediation on, a corrective plan is queued, and it still goes through approvals.
+Drift checks are started by a person (Check drift on the stack): a refresh-only plan that compares the live resources with state, changes nothing and needs no approvals. Nothing schedules them. When drift is found, the person chooses: revert the live resources to the code (plan an apply, with the usual approvals), or keep the live change by updating the stack or its contract and planning it.
 
 ## Git-managed stacks (contracts repository)
 

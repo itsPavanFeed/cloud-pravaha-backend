@@ -138,7 +138,6 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /api/v1/stacks/{id}", u(s.updateStack))
 	mux.Handle("GET /api/v1/stacks/{id}/runs", u(s.listStackRuns))
 	mux.Handle("POST /api/v1/stacks/{id}/runs", u(s.createRun))
-	mux.Handle("PUT /api/v1/stacks/{id}/drift", u(s.setDrift))
 	mux.Handle("GET /api/v1/stacks/{id}/state-versions", u(s.listStateVersions))
 	mux.Handle("GET /api/v1/runs", u(s.listRuns))
 	mux.Handle("GET /api/v1/runs/{id}", u(s.getRun))
@@ -241,8 +240,6 @@ func (s *Server) Run(ctx context.Context) error {
 		defer t.Close()
 		s.engine = t
 		s.log.Info("run lifecycles are orchestrated by Temporal", "address", s.cfg.TemporalAddress, "task_queue", "pravaha-"+s.cfg.Tenant)
-	} else {
-		go s.driftScheduler(ctx)
 	}
 	go s.reaper(ctx)
 	go s.contractsSyncer(ctx)
@@ -286,10 +283,6 @@ func (o orchStore) Expire(ctx context.Context, runID string, from []string, to, 
 		o.s.audit(ctx, "system:temporal", "run.expired", "run/"+runID, "", map[string]string{"status": to, "reason": reason})
 	}
 	return moved, err
-}
-
-func (o orchStore) QueueDueDrift(ctx context.Context) ([]string, error) {
-	return o.s.queueDueDrift(ctx), nil
 }
 
 // runCreated wakes runners and starts the run's lifecycle in the engine.

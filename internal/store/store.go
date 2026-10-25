@@ -383,31 +383,6 @@ func (s *Store) ListStacks(ctx context.Context, bus []string) ([]*Stack, error) 
 	return Collect(rows, scanStack)
 }
 
-func (s *Store) SetDrift(ctx context.Context, stackID string, d DriftSettings) error {
-	_, err := s.db.Exec(ctx, `UPDATE stacks SET drift_interval_minutes = $2, drift_auto_remediate = $3 WHERE id = $1`, stackID, d.IntervalMinutes, d.AutoRemediate)
-	return err
-}
-
-// DueForDrift returns stacks whose scheduled drift check is due and that have
-// no active run, marking them checked so concurrent schedulers skip them.
-func (s *Store) DueForDrift(ctx context.Context) ([]string, error) {
-	rows, err := s.db.Query(ctx, `UPDATE stacks SET last_drift_check = now()
-		WHERE drift_interval_minutes > 0
-		  AND (last_drift_check IS NULL OR last_drift_check < now() - make_interval(mins => drift_interval_minutes))
-		  AND NOT EXISTS (SELECT 1 FROM runs WHERE stack_id = stacks.id AND status IN ('queued','planning','planned','apply_queued','applying'))
-		RETURNING id`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var ids []string
-	for rows.Next() {
-		var id string
-		rows.Scan(&id)
-		ids = append(ids, id)
-	}
-	return ids, rows.Err()
-}
 
 // ---- runs ----
 
