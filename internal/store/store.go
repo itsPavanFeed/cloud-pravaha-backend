@@ -741,16 +741,17 @@ type PolicySet struct {
 	Level     string    `json:"level"`
 	Module    string    `json:"module"`
 	Enabled   bool      `json:"enabled"`
+	Source    string    `json:"source"` // console | release
 	CreatedBy string    `json:"created_by"`
 	UpdatedBy string    `json:"updated_by"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-const psCols = `id, name, scope, level, module, enabled, created_by, updated_by, updated_at`
+const psCols = `id, name, scope, level, module, enabled, source, created_by, updated_by, updated_at`
 
 func scanPS(r pgx.Row) (*PolicySet, error) {
 	var p PolicySet
-	err := r.Scan(&p.ID, &p.Name, &p.Scope, &p.Level, &p.Module, &p.Enabled, &p.CreatedBy, &p.UpdatedBy, &p.UpdatedAt)
+	err := r.Scan(&p.ID, &p.Name, &p.Scope, &p.Level, &p.Module, &p.Enabled, &p.Source, &p.CreatedBy, &p.UpdatedBy, &p.UpdatedAt)
 	return &p, NotFound(err)
 }
 

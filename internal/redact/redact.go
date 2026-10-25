@@ -57,3 +57,17 @@ func (r *Redactor) String(s string) string {
 	}
 	return s
 }
+
+// LooksLikeSecret reports whether a value has the shape of a credential: cloud
+// access keys, private keys, JWTs, platform or GitHub tokens, storage keys.
+func LooksLikeSecret(s string) bool {
+	for i, re := range patterns {
+		if i == 1 { // "password = x" style: too loose for values (descriptions, names)
+			continue
+		}
+		if re.MatchString(s) {
+			return true
+		}
+	}
+	return false
+}

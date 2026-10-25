@@ -4,8 +4,9 @@
 // in nested modules and providers of their own, so after init the runner checks
 // what was actually downloaded:
 //
-//   - every module came from registry.opentofu.org at an approved version, or is a
-//     local subdirectory inside an approved module package;
+//   - every module came from registry.opentofu.org at an approved version, is a
+//     local subdirectory inside an approved module package, or is vendored from
+//     the deployed module release (vendor/, verified by checksum before init);
 //   - every provider in the dependency lock file is allowlisted at its pinned version;
 //   - no loaded module contains provisioners or the external data source, which
 //     would run arbitrary commands on the runner.
@@ -94,6 +95,9 @@ func Check(workdir string, cat *catalog.Catalog) error {
 				continue
 			}
 			packages[m.Key] = pkg
+		case (strings.HasPrefix(m.Source, "./") || strings.HasPrefix(m.Source, "../")) && within(dir, filepath.Join(root, "vendor")):
+			// Vendored from the module release: built, rewritten and checked at
+			// release time, and verified by checksum when extracted.
 		case strings.HasPrefix(m.Source, "./") || strings.HasPrefix(m.Source, "../"):
 			pkg := owningPackage(m.Key, packages)
 			if pkg == "" || !within(dir, pkg) {
@@ -158,11 +162,20 @@ func scanForExec(dir string) error {
 		if err != nil {
 			return err
 		}
-		src := stripComments(string(b))
-		for _, re := range execPatterns {
-			if re.MatchString(src) {
-				return fmt.Errorf("%s: contains command execution (%s), which is not allowed", filepath.Join(filepath.Base(dir), n), re.String())
-			}
+		if err := ExecIn(filepath.Join(filepath.Base(dir), n), b); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ExecIn reports command execution (provisioners, the external data source)
+// in one configuration file. Module builds use it on every vendored file.
+func ExecIn(name string, content []byte) error {
+	src := stripComments(string(content))
+	for _, re := range execPatterns {
+		if re.MatchString(src) {
+			return fmt.Errorf("%s: contains command execution (%s), which is not allowed", name, re.String())
 		}
 	}
 	return nil
@@ -191,7 +204,7 @@ func resolveInside(root, rel string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if !within(p, filepath.Join(root, ".terraform", "modules")) {
+	if !within(p, filepath.Join(root, ".terraform", "modules")) && !within(p, filepath.Join(root, "vendor")) {
 		return "", fmt.Errorf("directory %q is outside the module cache", rel)
 	}
 	return p, nil

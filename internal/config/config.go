@@ -56,6 +56,15 @@ type Server struct {
 	// EnvFile is a writable .env holding integration settings (PRAVAHA_GITHUB_*);
 	// they are watched and reloaded. Empty keeps them sealed in the database.
 	EnvFile string
+
+	// Release bundles (vendored modules) are cached in memory and on disk so
+	// the database or bucket holding them is read once per bundle.
+	BundleCacheDir string
+	BundleCacheMem int64 // bytes
+	BundleCacheDisk int64
+	// RegistryURL is where module builds download packages; a private mirror
+	// of registry.opentofu.org may be used. Default: the public registry.
+	RegistryURL string
 }
 
 // Central configures the central plane: frontend, identity, tenant routing.
@@ -96,6 +105,10 @@ type Runner struct {
 	PluginCache string
 	Name        string
 	Concurrency int // runs executed at the same time, each in its own work and temp directories
+	// BundleCacheDir keeps module release bundles between runs (by checksum),
+	// so a runner downloads each release once.
+	BundleCacheDir  string
+	BundleCacheDisk int64
 }
 
 // DefaultTofuVersion is the OpenTofu release runs are pinned to unless overridden.
@@ -135,9 +148,23 @@ func LoadServer() (*Server, error) {
 		AssistantDocsDir:   os.Getenv("PRAVAHA_ASSISTANT_DOCS_DIR"),
 		AssistantFallbacks: os.Getenv("PRAVAHA_ASSISTANT_FALLBACKS") != "0",
 		EnvFile:            absPath(os.Getenv("PRAVAHA_ENV_FILE")),
+		BundleCacheDir:     os.Getenv("PRAVAHA_BUNDLE_CACHE_DIR"),
+		BundleCacheMem:     int64(envInt("PRAVAHA_BUNDLE_CACHE_MEMORY_MB", 256)) << 20,
+		BundleCacheDisk:    int64(envInt("PRAVAHA_BUNDLE_CACHE_DISK_MB", 2048)) << 20,
+		RegistryURL:        strings.TrimRight(os.Getenv("PRAVAHA_REGISTRY_URL"), "/"),
+	}
+	if c.BundleCacheDir == "" {
+		if d, err := os.UserCacheDir(); err == nil && c.Tenant != "" {
+			c.BundleCacheDir = filepath.Join(d, "pravaha", "bundles", c.Tenant)
+		}
 	}
 	var errs []error
 	errs = append(errs, common(c.DatabaseURL, c.MasterKey, c.PublicURL, false)...)
+	if c.RegistryURL != "" {
+		if u, err := url.Parse(c.RegistryURL); err != nil || u.Host == "" || !(u.Scheme == "https" || u.Scheme == "http" && loopbackHost(u.Hostname())) {
+			errs = append(errs, errors.New("PRAVAHA_REGISTRY_URL must be an https URL (plain http only on loopback, for development)"))
+		}
+	}
 	switch c.AssistantEffort {
 	case "low", "medium", "high", "xhigh", "max":
 	default:
@@ -251,6 +278,8 @@ func LoadRunner() (*Runner, error) {
 		TofuPath:    env("PRAVAHA_TOFU_PATH", "tofu"),
 		WorkRoot:    os.Getenv("PRAVAHA_WORK_DIR"),
 		PluginCache: os.Getenv("PRAVAHA_PLUGIN_CACHE_DIR"),
+		BundleCacheDir:  os.Getenv("PRAVAHA_BUNDLE_CACHE_DIR"),
+		BundleCacheDisk: int64(envInt("PRAVAHA_BUNDLE_CACHE_DISK_MB", 1024)) << 20,
 		Name:        env("PRAVAHA_RUNNER_NAME", hostname()),
 		Concurrency: atoiDefault(os.Getenv("PRAVAHA_RUNNER_CONCURRENCY"), 2),
 	}
@@ -325,4 +354,11 @@ func atoiDefault(v string, def int) int {
 		return -1 // reported by validation
 	}
 	return n
+}
+
+func envInt(name string, def int) int {
+	if v, err := strconv.Atoi(os.Getenv(name)); err == nil && v > 0 {
+		return v
+	}
+	return def
 }

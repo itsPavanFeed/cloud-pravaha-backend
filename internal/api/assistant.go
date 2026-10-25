@@ -25,14 +25,25 @@ func (s *Server) enableAssistant() error {
 	if err != nil {
 		return fmt.Errorf("PRAVAHA_ASSISTANT_DOCS_DIR: %w", err)
 	}
-	s.assistantDocs = append(append(assistant.CatalogDocs(s.catalog), assistant.GuideDocs()...), extra...)
+	s.assistantExtra = extra
+	s.refreshAssistantDocs()
 	s.assistant = assistant.New(assistant.Config{
 		APIKey: s.cfg.AssistantAPIKey, BaseURL: s.cfg.AssistantBaseURL, Model: s.cfg.AssistantModel,
 		Effort: s.cfg.AssistantEffort, Fallbacks: s.cfg.AssistantFallbacks,
 	})
 	s.log.Info("assistant enabled: questions and retrieved passages are sent to the Anthropic API",
-		"model", s.cfg.AssistantModel, "passages", len(s.assistantDocs))
+		"model", s.cfg.AssistantModel, "passages", len(*s.assistantDocs.Load()))
 	return nil
+}
+
+// refreshAssistantDocs rebuilds the static passages (catalog, guide,
+// runbooks); called again when a module release is deployed.
+func (s *Server) refreshAssistantDocs() {
+	if s.cfg.AssistantAPIKey == "" {
+		return
+	}
+	docs := append(append(assistant.CatalogDocs(s.plat().cat), assistant.GuideDocs()...), s.assistantExtra...)
+	s.assistantDocs.Store(&docs)
 }
 
 func (s *Server) assistantInfo(w http.ResponseWriter, r *http.Request) {
@@ -166,7 +177,7 @@ func (s *Server) assistantCorpus(ctx context.Context, r *http.Request) (*assista
 	rs, _ := json.Marshal(s.riskSettings(ctx))
 	docs = append(docs, assistant.Doc{ID: "settings:risk", Kind: "settings", Title: "Risk policy",
 		Text: "This tenant's risk policy (approval steps per risk level, the risk of production changes, cost thresholds): " + string(rs)})
-	return assistant.NewIndex(s.assistantDocs, docs), envs, nil
+	return assistant.NewIndex(*s.assistantDocs.Load(), docs), envs, nil
 }
 
 // validateDraft runs the same checks as creating the stack, without saving.

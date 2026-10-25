@@ -1,5 +1,5 @@
-// Package contracts reads a tenant's contracts repository: one JSON file per
-// stack ({"name","environment","spec"}) under a folder of a Git branch.
+// Package contracts reads a tenant's contracts repository: YAML files, one
+// resource per file, where each folder is a stack (one state file).
 //
 // Sources are pull-based: the tenant plane asks the Git host for the branch's
 // current commit and downloads a snapshot when it changes. Nothing on the Git
@@ -8,7 +8,6 @@ package contracts
 
 import (
 	"archive/tar"
-	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -42,8 +41,9 @@ type Config struct {
 	Path     string `json:"path"`              // folder holding contracts, e.g. stacks
 	APIURL   string `json:"api_url,omitempty"` // GitHub Enterprise / self-hosted GitLab API base
 	Auth     string `json:"auth,omitempty"`    // token (default) | github_app
-	// Layout of the folder: "flat" (<path>/<stack>.json, the environment in the
-	// file) or "nested" (<path>/<entity>/<environment>/<bu>/<stack>.json).
+	// Layout of the folder: "flat" (<path>/<stack>/<resource>.yaml, the
+	// environment and BU in metadata) or "nested"
+	// (<path>/<entity>/<environment>/<bu>/<stack>/<resource>.yaml).
 	Layout           string `json:"layout,omitempty"`
 	PollSeconds      int    `json:"poll_seconds"` // >= 30
 	AutoPlan         bool   `json:"auto_plan"`    // queue a plan for every new or changed contract
@@ -106,16 +106,6 @@ func (c *Config) Validate(allowLocal bool) error {
 	return errors.Join(errs...)
 }
 
-// Contract is one stack definition from the repository.
-type Contract struct {
-	File        string          `json:"file"`
-	Name        string          `json:"name"`
-	Environment string          `json:"environment"`
-	Spec        json.RawMessage `json:"spec"`
-	BU          string          `json:"bu,omitempty"` // the owning business unit (from the folder in the nested layout)
-	Entity      string          `json:"-"`            // nested layout: the entity (product) folder
-}
-
 // Source fetches contracts from a Git host.
 type Source interface {
 	Revision(ctx context.Context) (string, error)
@@ -144,85 +134,6 @@ func New(c Config, token string, hc *http.Client) (Source, error) {
 		return &local{dir: c.Repo}, nil
 	}
 	return nil, fmt.Errorf("unknown provider %q", c.Provider)
-}
-
-// Parse extracts contracts from the files under dir. Each file is named after
-// its stack (<name>.json); problems are returned per file so one bad contract
-// does not block the others.
-func Parse(files map[string][]byte, dir string) ([]Contract, map[string]string) {
-	return ParseLayout(files, dir, "flat")
-}
-
-// ParseLayout is Parse for a folder layout. With "nested", contracts live at
-// <dir>/<entity>/<environment>/<bu>/<stack>.json: the entity's (product's)
-// environments are shared by its business units. A file that also names the
-// environment or BU must agree with its folders.
-func ParseLayout(files map[string][]byte, dir, layout string) ([]Contract, map[string]string) {
-	dir = strings.Trim(dir, "/")
-	var out []Contract
-	problems := map[string]string{}
-	names := make([]string, 0, len(files))
-	for f := range files {
-		names = append(names, f)
-	}
-	sort.Strings(names)
-	for _, f := range names {
-		if path.Ext(f) != ".json" {
-			continue
-		}
-		var entity, bu, env string
-		if layout == "nested" {
-			rel, inside := f, true
-			if dir != "" {
-				rel, inside = strings.CutPrefix(f, dir+"/")
-			}
-			if !inside {
-				continue
-			}
-			parts := strings.Split(rel, "/")
-			if len(parts) != 4 {
-				problems[f] = "with the nested layout, contracts live at " + path.Join(dir, "<entity>/<environment>/<bu>/<stack>.json")
-				continue
-			}
-			entity, env, bu = parts[0], parts[1], parts[2]
-		} else if path.Dir(f) != firstNonEmpty(dir, ".") {
-			continue
-		}
-		var c Contract
-		dec := json.NewDecoder(bytes.NewReader(files[f]))
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&c); err != nil {
-			problems[f] = "invalid contract: " + err.Error()
-			continue
-		}
-		if stem := strings.TrimSuffix(path.Base(f), ".json"); c.Name != stem {
-			problems[f] = fmt.Sprintf("contract name %q must match its file name %q", c.Name, stem)
-			continue
-		}
-		if layout == "nested" {
-			if c.Environment == "" {
-				c.Environment = env
-			} else if c.Environment != env {
-				problems[f] = fmt.Sprintf("the file names environment %q but sits in folder %q", c.Environment, env)
-				continue
-			}
-			if c.BU != "" && c.BU != bu {
-				problems[f] = fmt.Sprintf("the file names business unit %q but sits in folder %q", c.BU, bu)
-				continue
-			}
-			c.Entity, c.BU = entity, bu
-		}
-		c.File = f
-		out = append(out, c)
-	}
-	return out, problems
-}
-
-func firstNonEmpty(a, b string) string {
-	if a != "" {
-		return a
-	}
-	return b
 }
 
 // ---- GitHub ----

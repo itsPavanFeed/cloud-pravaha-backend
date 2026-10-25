@@ -24,6 +24,7 @@ import (
 
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/assistant"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/blob"
+	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/bundlecache"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/catalog"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/certs"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/config"
@@ -41,7 +42,6 @@ const AssertionHeader = "X-Pravaha-Assertion"
 type Server struct {
 	cfg     *config.Server
 	store   *store.Store
-	catalog *catalog.Catalog
 	sealer  *secure.Sealer
 	issuer  *oidc.Issuer
 	log     *slog.Logger
@@ -53,12 +53,15 @@ type Server struct {
 	wake    chan struct{} // closed to nudge long-polling runners when work is queued
 
 	assistant     *assistant.Assistant // nil = disabled
-	assistantDocs []assistant.Doc      // catalog, guide and runbooks
+	assistantDocs  atomic.Pointer[[]assistant.Doc] // catalog, guide and runbooks
+	assistantExtra []assistant.Doc                 // runbooks from PRAVAHA_ASSISTANT_DOCS_DIR
 	askLimiter    *httpx.Limiter
 	gh            ghCache                           // GitHub App with its token cache
 	ghSnap        atomic.Pointer[ghSettings]        // GitHub App settings, reloaded on change
 	dirSnap       atomic.Pointer[map[string]string] // business unit → entity, learned from central
 	slackSnap     atomic.Pointer[slackSettings]     // Slack incoming webhook, reloaded on change
+	platSnap      atomic.Pointer[platform]          // catalog, tenant defaults and deployed module release
+	bundles       *bundlecache.Cache                // release bundles: memory, then disk, then the database or bucket
 }
 
 func New(cfg *config.Server, st *store.Store, cat *catalog.Catalog, sealer *secure.Sealer, iss *oidc.Issuer, log *slog.Logger) (*Server, error) {
@@ -66,9 +69,19 @@ func New(cfg *config.Server, st *store.Store, cat *catalog.Catalog, sealer *secu
 	if err != nil {
 		return nil, err
 	}
-	srv := &Server{cfg: cfg, store: st, catalog: cat, sealer: sealer, issuer: iss, log: log, central: ck,
+	srv := &Server{cfg: cfg, store: st, sealer: sealer, issuer: iss, log: log, central: ck,
 		limiter: httpx.NewLimiter(10, time.Minute, 5*time.Minute), wake: make(chan struct{}), engine: orchestrator.Builtin{},
 		askLimiter: httpx.NewLimiter(60, time.Hour, 15*time.Minute)}
+	bundled, err := bundledPlatform(cat, cfg.CatalogDir, cfg.Tenant)
+	if err != nil {
+		return nil, err
+	}
+	srv.platSnap.Store(bundled)
+	if srv.bundles, err = bundlecache.New(srv.loadBundle, cfg.BundleCacheDir, cfg.BundleCacheMem, cfg.BundleCacheDisk); err != nil {
+		log.Warn("the bundle disk cache is unavailable; caching in memory only", "dir", cfg.BundleCacheDir, "err", err)
+		srv.bundles, _ = bundlecache.New(srv.loadBundle, "", cfg.BundleCacheMem, 0)
+	}
+	srv.loadActiveRelease(context.Background())
 	if err := srv.enableAssistant(); err != nil {
 		return nil, err
 	}
@@ -161,6 +174,18 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /api/v1/integrations/slack", u(s.putSlackIntegration))
 	mux.Handle("DELETE /api/v1/integrations/slack", u(s.deleteSlackIntegration))
 	mux.Handle("POST /api/v1/integrations/slack/test", u(s.testSlackIntegration))
+	mux.Handle("GET /api/v1/releases/cache", u(s.bundleCacheStats))
+	mux.Handle("GET /api/v1/releases/{kind}", u(s.listReleases))
+	mux.Handle("GET /api/v1/releases/{kind}/source", u(s.getReleaseSource))
+	mux.Handle("PUT /api/v1/releases/{kind}/source", u(s.putReleaseSource))
+	mux.Handle("PUT /api/v1/releases/{kind}/source/token", u(s.putReleaseToken))
+	mux.Handle("POST /api/v1/releases/{kind}/builds", u(s.buildReleaseNow))
+	mux.Handle("GET /api/v1/releases/{kind}/{id}", u(s.getRelease))
+	mux.Handle("POST /api/v1/releases/{kind}/{id}/deploy", u(s.deployReleaseNow))
+	mux.Handle("GET /api/v1/integrations/secret-store", u(s.getSecretStore))
+	mux.Handle("PUT /api/v1/integrations/secret-store", u(s.putSecretStore))
+	mux.Handle("DELETE /api/v1/integrations/secret-store", u(s.deleteSecretStore))
+	mux.Handle("POST /api/v1/integrations/secret-store/test", u(s.testSecretStore))
 	mux.Handle("POST /api/v1/pull-requests/{n}/plan", u(s.replanPullRequest))
 	mux.Handle("GET /api/v1/runners", u(s.listRunners))
 	mux.Handle("POST /api/v1/runners", u(s.createRunner))
@@ -172,6 +197,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/agent/runs/{id}/plan", s.authRun(s.agentPlan))
 	mux.Handle("GET /api/v1/agent/runs/{id}/plan", s.authRun(s.agentGetPlan))
 	mux.Handle("POST /api/v1/agent/runs/{id}/finish", s.authRun(s.agentFinish))
+	mux.Handle("GET /api/v1/agent/runs/{id}/bundles/{sha}", s.authRun(s.agentBundle))
 
 	// OpenTofu HTTP state backend, authenticated with the run token.
 	mux.HandleFunc("/state/v1/{stack}", s.state)
@@ -215,6 +241,7 @@ func (s *Server) Run(ctx context.Context) error {
 	go s.contractsSyncer(ctx)
 	go s.ghWatch(ctx)
 	go s.prReconciler(ctx)
+	go s.releaseSyncer(ctx)
 	s.log.Info("tenant plane serving HTTPS", "tenant", s.cfg.Tenant, "listen", s.cfg.Listen, "central", s.cfg.CentralURL)
 	return httpx.Serve(ctx, s.log, s.cfg.Listen, s.Handler(), tlsCfg, "", "")
 }

@@ -1,12 +1,60 @@
 package spec
 
 import (
-	"encoding/json"
 	"strings"
 	"testing"
 
+	"github.com/hashicorp/hcl/v2"
+	"github.com/hashicorp/hcl/v2/hclsyntax"
+	"github.com/hashicorp/hcl/v2/hclwrite"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/catalog"
+	"github.com/zclconf/go-cty/cty"
 )
+
+// block finds a block by path, e.g. block(t, cfg, "module naming") or
+// block(t, cfg, "terraform", "required_providers"), and returns its
+// attributes as source text. It also proves the file parses as HCL.
+func block(t *testing.T, src []byte, path ...string) map[string]string {
+	t.Helper()
+	f, diags := hclwrite.ParseConfig(src, "main.tf", hcl.InitialPos)
+	if diags.HasErrors() {
+		t.Fatalf("generated config is not valid HCL: %v\n%s", diags, src)
+	}
+	body := f.Body()
+	for _, p := range path {
+		want := strings.Fields(p)
+		var found *hclwrite.Block
+		for _, b := range body.Blocks() {
+			if b.Type() == want[0] && strings.Join(b.Labels(), " ") == strings.Join(want[1:], " ") {
+				found = b
+				break
+			}
+		}
+		if found == nil {
+			t.Fatalf("no block %q in:\n%s", p, src)
+		}
+		body = found.Body()
+	}
+	out := map[string]string{}
+	for name, a := range body.Attributes() {
+		out[name] = strings.TrimSpace(string(a.Expr().BuildTokens(nil).Bytes()))
+	}
+	return out
+}
+
+// literal evaluates an attribute that must be a plain value (no references).
+func literal(t *testing.T, src string) cty.Value {
+	t.Helper()
+	e, diags := hclsyntax.ParseExpression([]byte(src), "x", hcl.InitialPos)
+	if diags.HasErrors() {
+		t.Fatal(diags)
+	}
+	v, diags := e.Value(nil)
+	if diags.HasErrors() {
+		t.Fatalf("%s is not a literal: %v", src, diags)
+	}
+	return v
+}
 
 func testCatalog(t *testing.T) *catalog.Catalog {
 	t.Helper()
@@ -49,21 +97,24 @@ func TestValidStackGeneratesPinnedConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var cfg map[string]any
-	json.Unmarshal(gen.Files[ConfigFile], &cfg)
-	mod := cfg["module"].(map[string]any)["naming"].(map[string]any)
-	if mod["source"] != "registry.opentofu.org/Azure/naming/azurerm" || mod["version"] != "0.4.4" {
+	cfg := gen.Files[ConfigFile]
+	mod := block(t, cfg, "module naming")
+	if mod["source"] != `"registry.opentofu.org/Azure/naming/azurerm"` || mod["version"] != `"0.4.4"` {
 		t.Fatalf("module not pinned to the latest approved version: %v", mod)
 	}
-	rp := cfg["terraform"].(map[string]any)["required_providers"].(map[string]any)["random"].(map[string]any)
-	if rp["version"] != "3.9.1" {
+	rp := literal(t, block(t, cfg, "terraform", "required_providers")["random"])
+	if rp.GetAttr("version").AsString() != "3.9.1" {
 		t.Fatalf("provider not pinned: %v", rp)
 	}
-	if cfg["terraform"].(map[string]any)["required_version"] != "= 1.13.2" {
+	if block(t, cfg, "terraform")["required_version"] != `"= 1.13.2"` {
 		t.Fatal("engine version not pinned")
 	}
-	if _, ok := cfg["terraform"].(map[string]any)["backend"].(map[string]any)["http"]; !ok {
-		t.Fatal("state must go to the control plane HTTP backend")
+	block(t, cfg, "terraform", "backend http") // state goes to the control plane HTTP backend
+	if block(t, cfg, "output sa")["value"] != "module.naming.storage_account" {
+		t.Fatal("output must reference the module")
+	}
+	if gen.Spec == nil || !strings.Contains(string(gen.Spec), `"kind":"AzureNaming"`) {
+		t.Fatalf("normalized spec should carry the kind: %s", gen.Spec)
 	}
 }
 
@@ -78,10 +129,18 @@ func TestEnforcedBaselineAndReferences(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(gen.Files[ConfigFile])
-	for _, want := range []string{`"enable_flow_log": true`, `"vpc_id": "${module.vpc.vpc_id}"`, `"skip_metadata_api_check": true`, `"managed-by": "cloud-pravaha"`} {
-		if !strings.Contains(s, want) {
-			t.Errorf("generated config is missing %s\n%s", want, s)
-		}
+	if block(t, gen.Files[ConfigFile], "module vpc")["enable_flow_log"] != "true" {
+		t.Errorf("baseline missing\n%s", s)
+	}
+	if block(t, gen.Files[ConfigFile], "module sg")["vpc_id"] != "module.vpc.vpc_id" {
+		t.Errorf("reference not wired\n%s", s)
+	}
+	if block(t, gen.Files[ConfigFile], "provider aws")["skip_metadata_api_check"] != "true" {
+		t.Errorf("metadata fallback not disabled\n%s", s)
+	}
+	tags := literal(t, block(t, gen.Files[ConfigFile], "provider aws", "default_tags")["tags"])
+	if tags.GetAttr("managed-by").AsString() != "cloud-pravaha" {
+		t.Errorf("default tags missing\n%s", s)
 	}
 	for _, bad := range []string{"access_key", "secret_key", "profile", "arn:aws:iam"} {
 		if strings.Contains(s, bad) {
@@ -207,8 +266,9 @@ func TestImports(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(gen.Files[ConfigFile]), `"to": "module.vpc.aws_vpc.this[0]"`) {
-		t.Fatal("import block not generated")
+	if !strings.Contains(string(gen.Files[ConfigFile]), `to = module.vpc.aws_vpc.this[0]`) ||
+		!strings.Contains(string(gen.Files[ConfigFile]), `to = module.vpc.module.flow.aws_iam_role.this["x"]`) {
+		t.Fatalf("import blocks not generated:\n%s", gen.Files[ConfigFile])
 	}
 	for _, bad := range []string{
 		`{"to":"aws_vpc.root","id":"vpc-1"}`,                     // outside any module
@@ -238,20 +298,15 @@ func TestInputIntoEnforcedObject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var cfg struct {
-		Module map[string]map[string]json.RawMessage `json:"module"`
-	}
-	json.Unmarshal(gen.Files["main.tf.json"], &cfg)
-	db := cfg.Module["db"]
+	db := block(t, gen.Files[ConfigFile], "module db")
 	if _, top := db["private_network"]; top {
 		t.Fatal("into input must not be a top-level module argument")
 	}
-	var ip map[string]any
-	json.Unmarshal(db["ip_configuration"], &ip)
-	if ip["ipv4_enabled"] != false || ip["private_network"] != "projects/p-12345/global/networks/n" {
+	ip := literal(t, db["ip_configuration"])
+	if ip.GetAttr("ipv4_enabled").True() || ip.GetAttr("private_network").AsString() != "projects/p-12345/global/networks/n" {
 		t.Fatalf("ip_configuration = %v", ip)
 	}
-	if !strings.HasSuffix(string(db["source"]), `//modules/postgresql"`) {
+	if !strings.HasSuffix(db["source"], `//modules/postgresql"`) {
 		t.Fatalf("source = %s", db["source"])
 	}
 	if !c.ModuleVersionAllowed("terraform-google-modules/sql-db/google", "28.3.0") {
@@ -288,14 +343,8 @@ func TestOrganisationLabels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var cfg struct {
-		Module map[string]struct {
-			Tags map[string]string `json:"tags"`
-		} `json:"module"`
-	}
-	json.Unmarshal(gen.Files["main.tf.json"], &cfg)
-	tags := cfg.Module["x"].Tags
-	if tags["team"] != "pay" || tags["pravaha-bu"] != "payments" || tags["pravaha-entity"] != "retail" {
+	tags := literal(t, block(t, gen.Files[ConfigFile], "module x")["tags"])
+	if tags.GetAttr("team").AsString() != "pay" || tags.GetAttr("pravaha-bu").AsString() != "payments" || tags.GetAttr("pravaha-entity").AsString() != "retail" {
 		t.Fatalf("azure tags = %v (user tags kept, platform labels win)", tags)
 	}
 }

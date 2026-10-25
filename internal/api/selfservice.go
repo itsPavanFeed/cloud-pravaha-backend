@@ -9,13 +9,17 @@ import (
 	"fmt"
 	"net/http"
 	"path"
+	"sort"
+	"strings"
 
+	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/contracts"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/spec"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/store"
 )
 
 // Self-service through Git: instead of creating a stack directly, the console
-// (or an assistant draft) writes the contract to a new branch of the contracts
+// (or an assistant draft) writes the stack's contract files (one YAML file per
+// resource) to a new branch of the contracts
 // repository and opens a pull request. The pull request is then planned,
 // approved and applied before it merges, so Git stays the source of truth.
 
@@ -45,7 +49,8 @@ func (s *Server) proposeStack(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusForbidden, "proposing stacks needs the developer or admin role in "+bu)
 		return
 	}
-	if _, _, probs := s.build(r.Context(), b.Name, bu, env, b.Spec); probs != nil {
+	gen, _, probs := s.build(r.Context(), b.Name, bu, env, b.Spec)
+	if probs != nil {
 		writeErr(w, 422, "stack spec rejected", probs...)
 		return
 	}
@@ -71,28 +76,50 @@ func (s *Server) proposeStack(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	file := path.Join(cfg.Path, b.Name+".json")
+	// One YAML file per resource; the folder is the stack.
+	folder := path.Join(cfg.Path, b.Name)
 	if cfg.Layout == "nested" {
-		file = path.Join(cfg.Path, env.Entity, env.Name, bu, b.Name+".json")
+		folder = path.Join(cfg.Path, env.Entity, env.Name, bu, b.Name)
 	}
-	var specVal any
-	json.Unmarshal(normalizeSpec(b.Spec), &specVal)
-	content, _ := json.MarshalIndent(map[string]any{"name": b.Name, "bu": bu, "environment": env.Name, "spec": specVal}, "", "  ")
-	content = append(content, '\n')
+	files, err := contracts.Render(gen.Spec, env.Name, bu, cfg.Layout != "nested")
+	if err != nil {
+		writeErr(w, 422, "the stack cannot be written as contracts: "+err.Error())
+		return
+	}
+	file := folder + "/"
 
 	rnd := make([]byte, 3)
 	rand.Read(rnd)
 	branch := "pravaha/" + b.Name + "-" + hex.EncodeToString(rnd)
+	msg := fmt.Sprintf("%s stack %s (requested by %s)", action, b.Name, p.Subject)
 	base, err := app.BranchSHA(ctx, inst, cfg.Repo, cfg.Branch)
 	if err == nil {
 		err = app.CreateBranch(ctx, inst, cfg.Repo, branch, base)
 	}
-	var sha string
+	var existing map[string]string
 	if err == nil {
-		sha, err = app.FileSHA(ctx, inst, cfg.Repo, file, branch)
+		existing, err = app.DirFiles(ctx, inst, cfg.Repo, folder, branch)
 	}
-	if err == nil {
-		err = app.PutFile(ctx, inst, cfg.Repo, file, branch, fmt.Sprintf("%s stack %s (requested by %s)", action, b.Name, p.Subject), content, sha)
+	names := make([]string, 0, len(files))
+	for n := range files {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		if err != nil {
+			break
+		}
+		err = app.PutFile(ctx, inst, cfg.Repo, folder+"/"+n, branch, msg, files[n], existing[n])
+	}
+	// Resources removed from the stack: their files go too. Other files in the
+	// folder (a README, notes) are left alone.
+	for n, sha := range existing {
+		if err != nil {
+			break
+		}
+		if _, keep := files[n]; !keep && (strings.HasSuffix(n, ".yaml") || strings.HasSuffix(n, ".yml")) {
+			err = app.DeleteFile(ctx, inst, cfg.Repo, folder+"/"+n, branch, msg, sha)
+		}
 	}
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "writing to the contracts repository failed: "+err.Error())

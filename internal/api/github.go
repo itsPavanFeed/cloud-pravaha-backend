@@ -489,12 +489,16 @@ func (s *Server) handleGitHubEvent(ctx context.Context, d *store.WebhookDelivery
 		}
 		return "processed", fmt.Sprintf("installation %d %s", installationID, d.Action)
 	case "push":
+		builds := s.releasePush(ctx, d.Repo, d.Ref)
 		cc, ok := s.contractsConfig(ctx)
-		if !ok || cc.Provider != "github" || !strings.EqualFold(cc.Repo, d.Repo) {
-			return "ignored", "not the contracts repository"
-		}
-		if d.Ref != "refs/heads/"+cc.Branch {
-			return "ignored", "push to " + d.Ref + ", contracts follow " + cc.Branch
+		if !ok || cc.Provider != "github" || !strings.EqualFold(cc.Repo, d.Repo) || d.Ref != "refs/heads/"+cc.Branch {
+			if len(builds) > 0 {
+				return "processed", "release build checked for " + strings.Join(builds, " and ")
+			}
+			if ok && strings.EqualFold(cc.Repo, d.Repo) {
+				return "ignored", "push to " + d.Ref + ", contracts follow " + cc.Branch
+			}
+			return "ignored", "not the contracts, modules or policies repository"
 		}
 		go func() {
 			sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)

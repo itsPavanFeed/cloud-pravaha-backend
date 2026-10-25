@@ -192,7 +192,7 @@ func (s *Server) planPRContracts(ctx context.Context, cfg *contracts.Config, num
 			fail(strings.Join(probs, "; "))
 			continue
 		}
-		spec := normalizeSpec(c.Spec)
+		spec := []byte(gen.Spec)
 		st, err := s.store.GetStack(ctx, c.Name)
 		switch {
 		case errors.Is(err, store.ErrNotFound):

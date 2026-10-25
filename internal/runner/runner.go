@@ -27,7 +27,9 @@ import (
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/api"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/catalog"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/config"
+	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/bundlecache"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/depcheck"
+	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/release"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/policy"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/redact"
 	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/secure"
@@ -48,6 +50,73 @@ type Runner struct {
 	pinned   *catalog.Catalog // a locally pinned catalog overrides the one in jobs
 	tofuPath string
 	initMu   sync.Mutex // tofu init shares the provider plugin cache; inits run one at a time
+	bundles  *bundlecache.Cache // module release bundles, by checksum
+}
+
+type jobKey struct{}
+
+// fetchBundle downloads a bundle from the tenant plane with the run's token
+// (the job travels in the context; the cache verifies the checksum).
+func (r *Runner) fetchBundle(ctx context.Context, sha string) ([]byte, error) {
+	j, _ := ctx.Value(jobKey{}).(*job)
+	if j == nil {
+		return nil, errors.New("no run to fetch the bundle for")
+	}
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, r.cfg.ServerURL+"/api/v1/agent/runs/"+j.RunID+"/bundles/"+sha, nil)
+	req.Header.Set("Authorization", "Bearer "+j.RunToken)
+	resp, err := r.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("downloading the module bundle: %s", resp.Status)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, 256<<20))
+}
+
+// extractModules writes the run's module packages from the release bundle
+// and verifies each one against the checksum in the generated config.
+func (j *job) extractModules(ctx context.Context) error {
+	b := j.Bundle
+	j.logs.Printf("==> modules from release bundle %s (%d packages)\n", b.SHA256[:12], len(b.Packages))
+	data, err := j.r.bundles.Get(context.WithValue(ctx, jobKey{}, j), b.SHA256)
+	if err != nil {
+		return fmt.Errorf("module bundle: %w", err)
+	}
+	got := map[string]map[string][]byte{}
+	for dir := range b.Packages {
+		if !strings.HasPrefix(dir, spec.VendorDir+"/") || strings.Contains(dir, "..") || strings.Count(dir, "/") != 4 {
+			return fmt.Errorf("job names an invalid module package %q", dir)
+		}
+		got[dir] = map[string][]byte{}
+	}
+	owner := func(name string) string {
+		if parts := strings.SplitN(name, "/", 6); len(parts) == 6 {
+			return strings.Join(parts[:5], "/")
+		}
+		return ""
+	}
+	_, err = release.Unpack(data, b.SHA256, func(name string) bool { _, ok := got[owner(name)]; return ok },
+		func(name string, content []byte) error {
+			dir := owner(name)
+			got[dir][strings.TrimPrefix(name, dir+"/")] = content
+			p := filepath.Join(j.dir, filepath.FromSlash(name))
+			if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+				return err
+			}
+			return os.WriteFile(p, content, 0o600)
+		})
+	if err != nil {
+		return fmt.Errorf("module bundle: %w", err)
+	}
+	for dir, want := range b.Packages {
+		if sum := release.PackageSum(got[dir]); sum != want {
+			return fmt.Errorf("module package %s does not match its checksum (got %s, want %s)", dir, sum[:12], want[:12])
+		}
+	}
+	j.logs.Printf("    every package verified by checksum; no module is downloaded from the internet\n")
+	return nil
 }
 
 func New(cfg *config.Runner, log *slog.Logger) (*Runner, error) {
@@ -81,6 +150,16 @@ func New(cfg *config.Runner, log *slog.Logger) (*Runner, error) {
 		if err := os.MkdirAll(cfg.WorkRoot, 0o700); err != nil {
 			return nil, err
 		}
+	}
+	dir := cfg.BundleCacheDir
+	if dir == "" {
+		if d, err := os.UserCacheDir(); err == nil {
+			dir = filepath.Join(d, "pravaha", "runner-bundles")
+		}
+	}
+	if r.bundles, err = bundlecache.New(r.fetchBundle, dir, 512<<20, cfg.BundleCacheDisk); err != nil {
+		log.Warn("bundle disk cache unavailable; caching in memory only", "dir", dir, "err", err)
+		r.bundles, _ = bundlecache.New(r.fetchBundle, "", 512<<20, 0)
 	}
 	return r, nil
 }
@@ -167,7 +246,7 @@ func (r *Runner) execute(ctx context.Context, j *api.Job) {
 	log := r.log.With("run", j.RunID, "stack", j.Stack, "phase", j.Phase)
 	log.Info("run claimed")
 	passphrase := secure.Derive([]byte(r.cfg.StateKey), "pravaha-state:"+j.StackID)
-	rj := &job{Job: j, r: r, red: redact.New(j.RunToken, j.OIDCToken, passphrase, r.cfg.StateKey, r.cfg.Token)}
+	rj := &job{Job: j, r: r, red: redact.New(j.RunToken, j.OIDCToken, j.VaultToken, passphrase, r.cfg.StateKey, r.cfg.Token)}
 	rj.logs = newLogSink(ctx, r, j)
 	defer rj.logs.Close()
 
@@ -217,6 +296,11 @@ func (j *job) run(ctx context.Context, passphrase string) (err error) {
 	}
 	if err := j.writeFiles(); err != nil {
 		return err
+	}
+	if j.Bundle != nil {
+		if err := j.extractModules(ctx); err != nil {
+			return err
+		}
 	}
 	if err := j.buildEnv(passphrase); err != nil {
 		return err
@@ -273,7 +357,7 @@ func (j *job) writeFiles() error {
 		return err
 	}
 	for name, data := range j.Files {
-		// Only the files the generator produces: main.tf.json and .pravaha/*.
+		// Only the files the generator produces: main.tf and .pravaha/*.
 		if name != spec.ConfigFile && !(strings.HasPrefix(name, ".pravaha/") && !strings.Contains(name, "..") && strings.Count(name, "/") == 1) {
 			return fmt.Errorf("job contains unexpected file %q", name)
 		}
@@ -283,6 +367,11 @@ func (j *job) writeFiles() error {
 	}
 	if j.OIDCToken != "" {
 		if err := os.WriteFile(filepath.Join(j.dir, spec.TokenFile), []byte(j.OIDCToken), 0o600); err != nil {
+			return err
+		}
+	}
+	if j.VaultToken != "" { // read by the vault provider's JWT login (file() in the generated config)
+		if err := os.WriteFile(filepath.Join(j.dir, spec.VaultTokenFile), []byte(j.VaultToken), 0o600); err != nil {
 			return err
 		}
 	}

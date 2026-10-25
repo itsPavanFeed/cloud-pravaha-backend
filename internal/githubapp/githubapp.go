@@ -379,6 +379,35 @@ func (a *App) PutFile(ctx context.Context, inst int64, repo, path, branch, messa
 	return a.Do(ctx, inst, http.MethodPut, repoPath(repo)+"/contents/"+escapePath(path), body, nil)
 }
 
+// DirFiles lists the files directly inside a folder on a branch (name -> blob
+// SHA). A missing folder is empty.
+func (a *App) DirFiles(ctx context.Context, inst int64, repo, dir, branch string) (map[string]string, error) {
+	var out []struct {
+		Name string `json:"name"`
+		Type string `json:"type"`
+		SHA  string `json:"sha"`
+	}
+	err := a.Do(ctx, inst, http.MethodGet, repoPath(repo)+"/contents/"+escapePath(dir)+"?ref="+url.QueryEscape(branch), nil, &out)
+	if e, ok := err.(*APIError); ok && e.Status == http.StatusNotFound {
+		return map[string]string{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	files := map[string]string{}
+	for _, f := range out {
+		if f.Type == "file" {
+			files[f.Name] = f.SHA
+		}
+	}
+	return files, nil
+}
+
+// DeleteFile removes a file on a branch in one commit.
+func (a *App) DeleteFile(ctx context.Context, inst int64, repo, path, branch, message, sha string) error {
+	return a.Do(ctx, inst, http.MethodDelete, repoPath(repo)+"/contents/"+escapePath(path), map[string]string{"message": message, "branch": branch, "sha": sha}, nil)
+}
+
 func (a *App) OpenPR(ctx context.Context, inst int64, repo, head, base, title, body string) (*PR, error) {
 	var p PR
 	return &p, a.Do(ctx, inst, http.MethodPost, repoPath(repo)+"/pulls", map[string]string{"head": head, "base": base, "title": title, "body": body}, &p)

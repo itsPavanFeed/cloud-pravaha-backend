@@ -6,14 +6,16 @@
 package catalog
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
-	"path/filepath"
+	"path"
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/itsPavanFeed/cloud-pravaha-backend/internal/yamlx"
 )
 
 // Registry is the only module and provider registry the platform trusts.
@@ -21,6 +23,8 @@ const Registry = "registry.opentofu.org"
 
 var (
 	idRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,62}$`)
+	// KindRe: the name contracts use for a catalog entry, e.g. S3Bucket.
+	KindRe = regexp.MustCompile(`^[A-Z][A-Za-z0-9]{1,62}$`)
 	// namespace/name/provider, optionally //modules/<sub> for a registry package's submodule
 	sourceRe  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}/[A-Za-z0-9][A-Za-z0-9_-]{0,63}/[a-z0-9]{1,32}(//modules/[a-z0-9_-]{1,64})?$`)
 	provRe    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}/[a-z0-9][a-z0-9-]{0,63}$`)
@@ -56,6 +60,9 @@ type Input struct {
 	Min         *float64 `json:"min,omitempty"`
 	Max         *float64 `json:"max,omitempty"`
 	MaxItems    int      `json:"max_items,omitempty"`
+	// Sensitive inputs never take a literal value: contracts must pass a
+	// secret reference, so the value stays in the secret store and out of Git.
+	Sensitive bool `json:"sensitive,omitempty"`
 	// Into places the value as a key inside an enforced object instead of as a
 	// module argument, so a baseline can lock an object's other keys.
 	Into string `json:"into,omitempty"`
@@ -67,8 +74,10 @@ type Input struct {
 func (i *Input) PatternRe() *regexp.Regexp     { return i.pattern }
 func (i *Input) ItemPatternRe() *regexp.Regexp { return i.itemPattern }
 
+// Module is one catalog entry. Contracts call it by its Kind.
 type Module struct {
 	ID           string         `json:"id"`
+	Kind         string         `json:"kind"`
 	Title        string         `json:"title"`
 	Description  string         `json:"description"`
 	Source       string         `json:"source"` // namespace/name/provider
@@ -102,11 +111,15 @@ type Catalog struct {
 	Providers []Provider `json:"providers"`
 
 	byID     map[string]*Module
+	byKind   map[string]*Module
 	bySource map[string]*Module
 	provider map[string]Provider
 }
 
 func (c *Catalog) Module(id string) *Module { return c.byID[id] }
+
+// Kind finds a catalog entry by the kind contracts use, e.g. "S3Bucket".
+func (c *Catalog) Kind(kind string) *Module { return c.byKind[kind] }
 
 // BaseSource strips a //modules/<sub> suffix: the registry package address.
 func BaseSource(src string) string {
@@ -148,7 +161,15 @@ func (c *Catalog) ModuleVersionAllowed(source, version string) bool {
 
 // New builds a catalog from already-decoded parts (for example, the copy a
 // runner receives with a job) and validates it exactly as Load does.
+//
+// A module built in code without a kind gets one derived from its id
+// (aws-vpc -> AwsVpc); catalog files must always name their kind.
 func New(mods []*Module, provs []Provider) (*Catalog, error) {
+	for _, m := range mods {
+		if m.Kind == "" {
+			m.Kind = KindFromID(m.ID)
+		}
+	}
 	c := &Catalog{Modules: mods, Providers: provs}
 	if err := c.index(); err != nil {
 		return nil, err
@@ -158,13 +179,14 @@ func New(mods []*Module, provs []Provider) (*Catalog, error) {
 
 // Catalog layout, segregated by cloud provider:
 //
-//	providers/<cloud>.json      providers for that cloud (exact pins)
-//	modules/<cloud>/<name>.json modules for that cloud
+//	providers/<cloud>.yaml      providers for that cloud (exact pins)
+//	modules/<cloud>/<name>.yaml one kind per file, wrapping one public module
 //
 // <cloud> is aws, gcp, azure, or "common" for modules and providers that need
 // no cloud credentials. The folder is the single source of truth for a
 // module's cloud, and a module may only use its own cloud's providers plus
-// common ones, so an AWS module can never pull in a GCP provider.
+// common ones, so an AWS module can never pull in a GCP provider. Files may be
+// YAML (.yaml, .yml) or JSON (.json).
 const CommonFolder = "common"
 
 // Clouds lists the supported cloud folders (besides common).
@@ -184,21 +206,25 @@ func folderCloud(folder string) (string, bool) {
 
 // Load reads a catalog directory laid out as described above and validates it.
 func Load(dir string) (*Catalog, error) {
-	var errs []error
-	if _, err := os.Stat(filepath.Join(dir, "providers.json")); err == nil {
-		errs = append(errs, errors.New("providers.json is the old flat layout; split it into providers/<cloud>.json"))
+	if _, err := os.Stat(dir); err != nil {
+		return nil, err
 	}
-	if flat, _ := filepath.Glob(filepath.Join(dir, "modules", "*.json")); len(flat) > 0 {
-		errs = append(errs, fmt.Errorf("modules must live in modules/<cloud>/, found %s", filepath.Base(flat[0])))
+	return LoadFS(os.DirFS(dir))
+}
+
+// LoadFS is Load for any file system, e.g. a snapshot of the modules repository.
+func LoadFS(fsys fs.FS) (*Catalog, error) {
+	var errs []error
+	if _, err := fs.Stat(fsys, "providers.json"); err == nil {
+		errs = append(errs, errors.New("providers.json is the old flat layout; split it into providers/<cloud>.yaml"))
 	}
 	c := &Catalog{}
-	pfiles, _ := filepath.Glob(filepath.Join(dir, "providers", "*.json"))
-	sort.Strings(pfiles)
+	pfiles := dataFiles(fsys, "providers")
 	if len(pfiles) == 0 {
-		errs = append(errs, fmt.Errorf("%s: no providers/<cloud>.json files", dir))
+		errs = append(errs, errors.New("no providers/<cloud>.yaml files"))
 	}
 	for _, f := range pfiles {
-		cloud, ok := folderCloud(strings.TrimSuffix(filepath.Base(f), ".json"))
+		cloud, ok := folderCloud(stem(f))
 		if !ok {
 			errs = append(errs, fmt.Errorf("%s: unknown cloud; use one of %s or %s", f, strings.Join(Clouds, ", "), CommonFolder))
 			continue
@@ -207,7 +233,7 @@ func Load(dir string) (*Catalog, error) {
 			Registry  string     `json:"registry"`
 			Providers []Provider `json:"providers"`
 		}
-		if err := readJSON(f, &pf); err != nil {
+		if err := readData(fsys, f, &pf); err != nil {
 			errs = append(errs, err)
 			continue
 		}
@@ -222,9 +248,12 @@ func Load(dir string) (*Catalog, error) {
 			c.Providers = append(c.Providers, p)
 		}
 	}
-	entries, err := os.ReadDir(filepath.Join(dir, "modules"))
+	if flat := dataFiles(fsys, "modules"); len(flat) > 0 {
+		errs = append(errs, fmt.Errorf("modules must live in modules/<cloud>/, found %s", flat[0]))
+	}
+	entries, err := fs.ReadDir(fsys, "modules")
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(append(errs, err)...)
 	}
 	for _, e := range entries {
 		if !e.IsDir() {
@@ -235,11 +264,9 @@ func Load(dir string) (*Catalog, error) {
 			errs = append(errs, fmt.Errorf("modules/%s: unknown cloud folder; use one of %s or %s", e.Name(), strings.Join(Clouds, ", "), CommonFolder))
 			continue
 		}
-		files, _ := filepath.Glob(filepath.Join(dir, "modules", e.Name(), "*.json"))
-		sort.Strings(files)
-		for _, f := range files {
+		for _, f := range dataFiles(fsys, path.Join("modules", e.Name())) {
 			var m Module
-			if err := readJSON(f, &m); err != nil {
+			if err := readData(fsys, f, &m); err != nil {
 				errs = append(errs, err)
 				continue
 			}
@@ -259,8 +286,32 @@ func Load(dir string) (*Catalog, error) {
 	return c, nil
 }
 
+// dataFiles lists the YAML and JSON files directly inside dir, sorted.
+func dataFiles(fsys fs.FS, dir string) []string {
+	entries, _ := fs.ReadDir(fsys, dir)
+	var out []string
+	for _, e := range entries {
+		if !e.IsDir() && isData(e.Name()) {
+			out = append(out, path.Join(dir, e.Name()))
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func isData(name string) bool {
+	switch path.Ext(name) {
+	case ".yaml", ".yml", ".json":
+		return true
+	}
+	return false
+}
+
+func stem(f string) string { return strings.TrimSuffix(path.Base(f), path.Ext(f)) }
+
 func (c *Catalog) index() error {
 	c.byID = map[string]*Module{}
+	c.byKind = map[string]*Module{}
 	c.bySource = map[string]*Module{}
 	c.provider = map[string]Provider{}
 	var errs []error
@@ -283,6 +334,14 @@ func (c *Catalog) index() error {
 		}
 		if c.byID[m.ID] != nil {
 			errs = append(errs, fmt.Errorf("%s: duplicate id", where))
+		}
+		switch {
+		case !KindRe.MatchString(m.Kind):
+			errs = append(errs, fmt.Errorf("%s: kind %q must be a name like S3Bucket", where, m.Kind))
+		case m.Kind == "Defaults" || m.Kind == "Stack":
+			errs = append(errs, fmt.Errorf("%s: kind %q is reserved", where, m.Kind))
+		case c.byKind[m.Kind] != nil:
+			errs = append(errs, fmt.Errorf("%s: kind %q is already used by %s", where, m.Kind, c.byKind[m.Kind].ID))
 		}
 		if !sourceRe.MatchString(m.Source) {
 			errs = append(errs, fmt.Errorf("%s: source %q must be a public registry address namespace/name/provider", where, m.Source))
@@ -325,6 +384,12 @@ func (c *Catalog) index() error {
 			if _, enforced := m.Enforced[in.Name]; enforced {
 				errs = append(errs, fmt.Errorf("%s: input %q is both user-settable and enforced", where, in.Name))
 			}
+			if in.Sensitive && in.Type != "string" {
+				errs = append(errs, fmt.Errorf("%s: sensitive input %q must be a string", where, in.Name))
+			}
+			if in.Sensitive && in.Default != nil {
+				errs = append(errs, fmt.Errorf("%s: sensitive input %q cannot have a default", where, in.Name))
+			}
 			if in.Into != "" {
 				obj, ok := m.Enforced[in.Into].(map[string]any)
 				if !ok {
@@ -347,9 +412,23 @@ func (c *Catalog) index() error {
 			}
 		}
 		c.byID[m.ID] = m
+		if m.Kind != "" && c.byKind[m.Kind] == nil {
+			c.byKind[m.Kind] = m
+		}
 		c.bySource[strings.ToLower(m.Source)] = m
 	}
 	return errors.Join(errs...)
+}
+
+// KindFromID derives a kind name from a module id: aws-s3-bucket -> AwsS3Bucket.
+func KindFromID(id string) string {
+	var b strings.Builder
+	for _, part := range strings.Split(id, "-") {
+		if part != "" {
+			b.WriteString(strings.ToUpper(part[:1]) + part[1:])
+		}
+	}
+	return b.String()
 }
 
 func cloudFolder(cloud string) string {
@@ -359,15 +438,18 @@ func cloudFolder(cloud string) string {
 	return cloud
 }
 
-func readJSON(path string, v any) error {
-	b, err := os.ReadFile(path)
+func readData(fsys fs.FS, name string, v any) error {
+	b, err := fs.ReadFile(fsys, name)
 	if err != nil {
 		return err
 	}
-	dec := json.NewDecoder(strings.NewReader(string(b)))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(v); err != nil {
-		return fmt.Errorf("%s: %w", path, err)
+	if path.Ext(name) == ".json" {
+		err = yamlx.DecodeJSON(b, v)
+	} else {
+		err = yamlx.Decode(b, v)
+	}
+	if err != nil {
+		return fmt.Errorf("%s: %w", name, err)
 	}
 	return nil
 }

@@ -40,7 +40,13 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getCatalog(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, 200, map[string]any{"registry": "registry.opentofu.org", "modules": s.catalog.Modules, "providers": s.catalog.Providers, "tofu_version": s.cfg.TofuVersion})
+	p := s.plat()
+	resp := map[string]any{"registry": "registry.opentofu.org", "modules": p.cat.Modules, "providers": p.cat.Providers, "tofu_version": s.cfg.TofuVersion,
+		"defaults": p.defaults.Kinds}
+	if p.release != nil {
+		resp["release"] = map[string]any{"id": p.release.ID, "number": p.release.Number, "sha256": p.release.SHA256}
+	}
+	writeJSON(w, 200, resp)
 }
 
 // ---- environments ----
@@ -228,6 +234,12 @@ type stackBody struct {
 
 // build validates a spec for an environment and generates its configuration.
 func (s *Server) build(ctx context.Context, stackName, bu string, env *store.Environment, raw []byte) (*spec.Generated, *spec.Cloud, []string) {
+	return s.buildWith(ctx, s.plat(), stackName, bu, env, raw)
+}
+
+// buildWith generates against one platform snapshot, so a caller that also
+// hands out the snapshot's bundle (a run claim) sees one consistent release.
+func (s *Server) buildWith(ctx context.Context, p *platform, stackName, bu string, env *store.Environment, raw []byte) (*spec.Generated, *spec.Cloud, []string) {
 	c, err := spec.DecodeCloud(env.Cloud)
 	if err != nil {
 		return nil, nil, []string{"environment cloud integration is invalid: " + err.Error()}
@@ -236,25 +248,15 @@ func (s *Server) build(ctx context.Context, stackName, bu string, env *store.Env
 	if err != nil {
 		return nil, nil, []string{err.Error()}
 	}
-	gen, err := st.Generate(s.catalog, spec.GenerateInput{
-		StackName: stackName, Environment: env.Name, Cloud: c, TofuVersion: s.cfg.TofuVersion,
-		Tenant: s.cfg.Tenant, Entity: env.Entity, BU: bu,
-	})
+	gen, err := st.Generate(p.cat, s.generateInput(ctx, p, spec.GenerateInput{
+		StackName: stackName, Environment: env.Name, Tier: env.Tier, Cloud: c, Entity: env.Entity, BU: bu,
+	}))
 	if err != nil {
 		return nil, nil, errLines(err)
 	}
 	return gen, c, nil
 }
 
-// normalizeSpec re-encodes a spec so stored specs are canonical (versions filled in).
-func normalizeSpec(raw []byte) []byte {
-	st, err := spec.Decode(raw)
-	if err != nil {
-		return raw
-	}
-	b, _ := json.Marshal(st)
-	return b
-}
 
 // visibleEnv loads an environment the caller can see, or answers 422.
 // target resolves where a stack goes: its business unit and an environment of
@@ -336,11 +338,12 @@ func (s *Server) createStack(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusForbidden, "creating stacks needs the developer or admin role in "+bu)
 		return
 	}
-	if _, _, probs := s.build(r.Context(), b.Name, bu, env, b.Spec); probs != nil {
+	gen, _, probs := s.build(r.Context(), b.Name, bu, env, b.Spec)
+	if probs != nil {
 		writeErr(w, 422, "stack spec rejected", probs...)
 		return
 	}
-	st, err := s.store.CreateStack(r.Context(), b.Name, bu, env.Entity, env.ID, normalizeSpec(b.Spec), p.Subject)
+	st, err := s.store.CreateStack(r.Context(), b.Name, bu, env.Entity, env.ID, gen.Spec, p.Subject)
 	if err != nil {
 		s.writeStoreErr(w, err, "a stack with that name exists")
 		return
@@ -387,15 +390,16 @@ func (s *Server) updateStack(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreErr(w, err, "")
 		return
 	}
-	if _, _, probs := s.build(r.Context(), st.Name, st.BU, env, b.Spec); probs != nil {
+	gen, _, probs := s.build(r.Context(), st.Name, st.BU, env, b.Spec)
+	if probs != nil {
 		writeErr(w, 422, "stack spec rejected", probs...)
 		return
 	}
-	if err := s.store.UpdateStack(r.Context(), st.ID, normalizeSpec(b.Spec)); err != nil {
+	if err := s.store.UpdateStack(r.Context(), st.ID, gen.Spec); err != nil {
 		s.writeStoreErr(w, err, "the stack has an active run; finish or discard it first")
 		return
 	}
-	s.audit(r.Context(), p.Actor(), "stack.update", "stack/"+st.Name, st.BU, map[string]any{"before": st.Spec, "after": json.RawMessage(normalizeSpec(b.Spec))})
+	s.audit(r.Context(), p.Actor(), "stack.update", "stack/"+st.Name, st.BU, map[string]any{"before": st.Spec, "after": gen.Spec})
 	st, _ = s.store.GetStack(r.Context(), st.ID)
 	writeJSON(w, 200, st)
 }

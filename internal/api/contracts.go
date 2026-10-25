@@ -252,7 +252,7 @@ func (s *Server) applyContract(ctx context.Context, cfg *contracts.Config, c con
 	if probs != nil {
 		return errOut(strings.Join(probs, "; "))
 	}
-	spec := normalizeSpec(c.Spec)
+	spec := []byte(gen.Spec)
 	existing, err := s.store.GetStack(ctx, c.Name)
 	switch {
 	case errors.Is(err, store.ErrNotFound):

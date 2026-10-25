@@ -31,6 +31,13 @@ const (
 )
 
 // Job is everything a runner needs for one phase of one run.
+// JobBundle tells a runner which release bundle holds the run's modules and
+// which packages (directory -> SHA-256 of their files) to extract from it.
+type JobBundle struct {
+	SHA256   string            `json:"sha256"`
+	Packages map[string]string `json:"packages"`
+}
+
 type Job struct {
 	RunID       string            `json:"run_id"`
 	StackID     string            `json:"stack_id"`
@@ -43,6 +50,8 @@ type Job struct {
 	Providers   []string          `json:"providers"`
 	TofuVersion string            `json:"tofu_version"`
 	OIDCToken   string            `json:"oidc_token,omitempty"`
+	VaultToken  string            `json:"vault_token,omitempty"` // for the secret store's JWT login
+	Bundle      *JobBundle        `json:"bundle,omitempty"`      // vendored modules of the deployed release
 	PlanSHA256  string            `json:"plan_sha256,omitempty"`
 	Catalog     JobCatalog        `json:"catalog"` // used by runners that do not pin their own catalog
 	// Phase-specific cloud identity: plan and apply may use different roles.
@@ -108,7 +117,8 @@ func (s *Server) startJob(w http.ResponseWriter, r *http.Request, run *store.Run
 		fail("environment not found")
 		return
 	}
-	gen, cloud, probs := s.build(ctx, st.Name, st.BU, env, runSpec(st, run))
+	plat := s.plat()
+	gen, cloud, probs := s.buildWith(ctx, plat, st.Name, st.BU, env, runSpec(st, run))
 	if probs != nil {
 		fail("stack no longer validates: " + probs[0])
 		return
@@ -120,7 +130,12 @@ func (s *Server) startJob(w http.ResponseWriter, r *http.Request, run *store.Run
 	job := Job{
 		RunID: run.ID, StackID: st.ID, Stack: st.Name, Environment: env.Name, Operation: run.Operation, Phase: phase,
 		RunToken: tok, Files: gen.Files, Providers: gen.Providers, TofuVersion: s.cfg.TofuVersion,
-		Catalog: JobCatalog{Modules: s.catalog.Modules, Providers: s.catalog.Providers},
+		Catalog: JobCatalog{Modules: plat.cat.Modules, Providers: plat.cat.Providers},
+	}
+	if len(gen.Vendored) > 0 {
+		// Modules come from the deployed release only: the runner downloads
+		// the bundle, verifies it and every package it extracts.
+		job.Bundle = &JobBundle{SHA256: plat.release.SHA256, Packages: gen.Vendored}
 	}
 	if phase == "apply" {
 		job.PlanSHA256 = deref(run.PlanSHA256)
@@ -136,7 +151,24 @@ func (s *Server) startJob(w http.ResponseWriter, r *http.Request, run *store.Run
 			return
 		}
 	}
-	s.audit(ctx, who(r).Subject(), "run.claim", "run/"+run.ID, run.BU, map[string]any{"phase": phase, "stack": st.Name, "oidc": cloud.NeedsOIDCToken()})
+	if gen.Secrets {
+		// The secret store gets its own token, for its own audience: a cloud
+		// token can never be replayed against Vault, or the other way round.
+		v := s.secretStore(ctx)
+		if v == nil {
+			fail("the stack uses secret references but no secret store is configured")
+			return
+		}
+		job.VaultToken, err = s.issuer.Sign(oidc.Claims{
+			Subject: oidc.Subject(env.Entity, env.Name, st.Name, phase), Audience: v.TokenAudience(),
+			Entity: env.Entity, Environment: env.Name, Stack: st.Name, RunID: run.ID, Phase: phase, TTL: oidcTokenTTL,
+		}, time.Now())
+		if err != nil {
+			fail("could not issue the run's secret store token")
+			return
+		}
+	}
+	s.audit(ctx, who(r).Subject(), "run.claim", "run/"+run.ID, run.BU, map[string]any{"phase": phase, "stack": st.Name, "oidc": cloud.NeedsOIDCToken(), "secrets": gen.Secrets})
 	writeJSON(w, 200, job)
 }
 
