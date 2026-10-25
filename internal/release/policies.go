@@ -105,7 +105,7 @@ func BuildPolicies(ctx context.Context, in PoliciesInput) *Result {
 			continue
 		}
 		byName[name] = f
-		s := &found{file: f, scope: scope, name: name, module: in.Files[f], test: in.Files[strings.TrimSuffix(f, ".rego")+"_test.rego"]}
+		s := &found{file: r, scope: scope, name: name, module: in.Files[f], test: in.Files[strings.TrimSuffix(f, ".rego")+"_test.rego"]}
 		if b, ok := in.Files[strings.TrimSuffix(f, ".rego")+".yaml"]; ok {
 			var m setMeta
 			if err := yamlx.Decode(b, &m); err != nil {

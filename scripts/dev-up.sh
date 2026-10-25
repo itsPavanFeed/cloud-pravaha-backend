@@ -133,7 +133,7 @@ if [[ -n "$FRESH" || ! -f "$DEV/tokens.env" ]]; then
   call "$TINA" POST /api/v1/tenants/acme/bus '{"slug":"data","name":"Data platform","entity":"platform"}' >/dev/null
   # email:role:scope-kind:scope (scope-kind is bu, entity, or empty for tenant-wide)
   for m in alice@acme.local:developer:bu:payments mike@acme.local:manager:bu:payments rita@acme.local:manager:entity:retail \
-           paul@acme.local:manager:entity:platform eve@acme.local:developer:bu:data fiona@acme.local:finops:: sam@acme.local:security:: ava@acme.local:auditor::; do
+           paul@acme.local:manager:entity:platform eve@acme.local:developer:bu:data fiona@acme.local:finops:: sam@acme.local:security:: ava@acme.local:auditor:: dora@acme.local:devops::; do
     IFS=: read -r email role kind scope <<<"$m"
     body="{\"email\":\"$email\",\"role\":\"$role\"${kind:+,\"$kind\":\"$scope\"}}"
     call "$TINA" POST /api/v1/tenants/acme/members "$body" >/dev/null
@@ -148,7 +148,7 @@ if [[ -n "$FRESH" || ! -f "$DEV/tokens.env" ]]; then
     echo "ROOT=$ROOT_TOKEN       # platform admin (onboarding only)"
     echo "TINA=$TINA       # acme tenant_admin"
     echo "ALICE=$ALICE       # developer, payments"
-    for u in mike rita paul eve fiona sam ava; do echo "$(echo $u | tr a-z A-Z)=$(tok "$TINA" $u@acme.local)"; done
+    for u in mike rita paul eve fiona sam ava dora; do echo "$(echo $u | tr a-z A-Z)=$(tok "$TINA" $u@acme.local)"; done
     echo "RUNNER_TOKEN=$RUNNER_TOKEN"
   } >"$DEV/tokens.env"
 fi
@@ -168,12 +168,26 @@ except Exception: print("")' || true)
     echo "could not add PAUL (see $DEV/paul.log)" >&2
   fi
 fi
+# Older seeds had no DevOps engineer (approves activating releases): add one.
+if ! grep -q '^DORA=' "$DEV/tokens.env"; then
+  ADMIN=$(sed -n 's/^ROOT=\([^ ]*\).*/\1/p' "$DEV/tokens.env")
+  curl -sS -o /dev/null -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' -X POST "$CENTRAL/api/v1/tenants/acme/members" \
+    --data-binary '{"email":"dora@acme.local","role":"devops"}' || true
+  DORA=$(curl -sS -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' -X POST "$CENTRAL/api/v1/tenants/acme/tokens" \
+    --data-binary '{"email":"dora@acme.local","name":"dev","ttl_days":30}' | python3 -c 'import sys,json
+try: print(json.load(sys.stdin).get("secret",""))
+except Exception: print("")' || true)
+  [[ -n "$DORA" ]] && (umask 077; echo "DORA=$DORA       # devops: approves activating releases" >>"$DEV/tokens.env")
+fi
 RUNNER_TOKEN=$(grep '^RUNNER_TOKEN=' "$DEV/tokens.env" | cut -d= -f2)
+# A private copy of the modules repository for releases, so edits made in the
+# console never touch your working copy.
+if [[ ! -d "$DEV/modules-repo" ]]; then cp -R "$ROOT/cloud-pravaha-modules" "$DEV/modules-repo"; fi
 # Point module releases at the local modules checkout (once): Tenant settings → Releases → Build now.
 ADMIN=$(sed -n 's/^ROOT=\([^ ]*\).*/\1/p' "$DEV/tokens.env")
 if ! curl -fsS -H "Authorization: Bearer $ADMIN" "$CENTRAL/api/v1/t/acme/releases/modules/source" 2>/dev/null | grep -q '"repo"'; then
   curl -sS -o /dev/null -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' -X PUT "$CENTRAL/api/v1/t/acme/releases/modules/source" \
-    --data-binary "{\"provider\":\"local\",\"repo\":\"$ROOT/cloud-pravaha-modules\",\"branch\":\"main\",\"path\":\"\",\"poll_seconds\":300,\"enabled\":false,\"auto_deploy\":false}" || true
+    --data-binary "{\"provider\":\"local\",\"repo\":\"$DEV/modules-repo\",\"branch\":\"main\",\"path\":\"\",\"poll_seconds\":300,\"enabled\":false,\"approvals\":1}" || true
 fi
 
 PRAVAHA_SERVER_URL=https://localhost:$TP PRAVAHA_RUNNER_TOKEN="$RUNNER_TOKEN" PRAVAHA_STATE_KEY="$PRAVAHA_STATE_KEY" \
@@ -195,7 +209,7 @@ cat <<EOT
     RITA   manager, entity Retail (all its BUs)      PAUL   manager, entity Platform (BU Data)
     FIONA  finops (tenant): signs finops
     SAM    security (tenant): signs security         EVE    developer, BU Data: cannot see Retail
-    AVA    auditor   TINA tenant admin   ROOT platform admin
+    AVA    auditor   TINA tenant admin   ROOT platform admin   DORA devops (approves releases)
   Temporal: ${PRAVAHA_TEMPORAL_ADDRESS:-off (built-in scheduler)}${PRAVAHA_TEMPORAL_ADDRESS:+ · UI http://localhost:8233}
   Logs in $DEV/*.log.  Ctrl-C to stop (PostgreSQL and Temporal keep running: docker rm -f $PG_NAME $TEMPORAL_NAME).
 

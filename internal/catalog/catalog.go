@@ -88,6 +88,9 @@ type Module struct {
 	Inputs       []*Input       `json:"inputs"`
 	Enforced     map[string]any `json:"enforced,omitempty"`
 	Outputs      []string       `json:"outputs"`
+	// File is where the kind is defined, relative to the catalog folder
+	// (modules/aws/s3-bucket.yaml); set by the loader, used by the console editor.
+	File string `json:"file,omitempty"`
 }
 
 func (m *Module) Input(name string) *Input {
@@ -273,7 +276,10 @@ func LoadFS(fsys fs.FS) (*Catalog, error) {
 			if m.Cloud != "" {
 				errs = append(errs, fmt.Errorf("%s: must not set cloud; the folder decides it", f))
 			}
-			m.Cloud = cloud
+			if m.File != "" {
+				errs = append(errs, fmt.Errorf("%s: must not set file", f))
+			}
+			m.Cloud, m.File = cloud, f
 			c.Modules = append(c.Modules, &m)
 		}
 	}

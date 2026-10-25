@@ -123,8 +123,10 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/tenants/{tenant}/bus", a(s.listBUs))
 	mux.Handle("POST /api/v1/tenants/{tenant}/bus", a(s.createBU))
 	mux.Handle("GET /api/v1/tenants/{tenant}/members", a(s.listMembers))
+	mux.Handle("GET /api/v1/tenants/{tenant}/approvers", a(s.listApprovers))
 	mux.Handle("POST /api/v1/tenants/{tenant}/members", a(s.addMember))
 	mux.Handle("DELETE /api/v1/tenants/{tenant}/members/{id}", a(s.removeMember))
+	mux.Handle("PUT /api/v1/tenants/{tenant}/users/{email}/roles", a(s.setUserRoles))
 	mux.Handle("POST /api/v1/tenants/{tenant}/tokens", a(s.issueMemberToken))
 	mux.Handle("GET /api/v1/tenants/{tenant}/slack", a(s.getSlackApp))
 	mux.Handle("PUT /api/v1/tenants/{tenant}/slack", a(s.putSlackApp))
@@ -649,6 +651,38 @@ func (s *Server) listMembers(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, 200, ms)
 }
 
+// listApprovers tells any member of a tenant who can sign which approval:
+// finops, security and devops (tenant-wide), and the managers of each entity
+// and business unit. It lists only the roles that approve, never other
+// memberships.
+func (s *Server) listApprovers(w http.ResponseWriter, r *http.Request) {
+	t, _ := s.tenantFor(w, r, false)
+	if t == nil {
+		return
+	}
+	ms, err := s.store.TenantMembers(r.Context(), t.ID)
+	if err != nil {
+		s.storeErr(w, err, "")
+		return
+	}
+	out := map[string]any{}
+	tenant := map[string][]string{}
+	entity := map[string][]string{}
+	bu := map[string][]string{}
+	for _, m := range ms {
+		switch {
+		case m.Role == identity.FinOps || m.Role == identity.Security || m.Role == identity.DevOps:
+			tenant[m.Role] = append(tenant[m.Role], m.Email)
+		case m.Role == identity.Manager && m.BU != "":
+			bu[m.BU] = append(bu[m.BU], m.Email)
+		case m.Role == identity.Manager && m.Entity != "":
+			entity[m.Entity] = append(entity[m.Entity], m.Email)
+		}
+	}
+	out["tenant"], out["entity_managers"], out["bu_managers"] = tenant, entity, bu
+	httpx.WriteJSON(w, 200, out)
+}
+
 func (s *Server) addMember(w http.ResponseWriter, r *http.Request) {
 	t, _ := s.tenantFor(w, r, true)
 	if t == nil {
@@ -696,6 +730,88 @@ func (s *Server) addMember(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r.Context(), current(r).Email, "member.add", "user/"+b.Email, t.Slug, m)
 	httpx.WriteJSON(w, 201, m)
+}
+
+// setUserRoles replaces a person's roles in a tenant with the given set (an
+// empty set removes the person from the tenant). Every role is validated like
+// a single grant, and a tenant admin cannot remove their own tenant_admin role.
+func (s *Server) setUserRoles(w http.ResponseWriter, r *http.Request) {
+	t, _ := s.tenantFor(w, r, true)
+	if t == nil {
+		return
+	}
+	email := r.PathValue("email") // as stored; people are matched by their exact address
+	if !emailRe.MatchString(email) {
+		httpx.WriteErr(w, 422, "email is invalid")
+		return
+	}
+	var b struct {
+		Roles []struct{ Role, Entity, BU string } `json:"roles"`
+	}
+	if !httpx.Decode(w, r, &b) {
+		return
+	}
+	if len(b.Roles) > 50 {
+		httpx.WriteErr(w, 422, "at most 50 roles per person")
+		return
+	}
+	var grants []Grant
+	selfAdmin := false
+	for _, g := range b.Roles {
+		gr := Grant{Role: g.Role}
+		switch {
+		case g.Entity == "" && g.BU == "" && identity.IsTenantRole(g.Role):
+			selfAdmin = selfAdmin || g.Role == identity.TenantAdmin
+		case g.Entity != "" && g.BU == "" && identity.IsScopedRole(g.Role):
+			e, err := s.store.Entity(r.Context(), t.ID, g.Entity)
+			if err != nil {
+				httpx.WriteErr(w, 422, "unknown entity "+g.Entity)
+				return
+			}
+			gr.EntityID = &e.ID
+		case g.BU != "" && g.Entity == "" && identity.IsScopedRole(g.Role):
+			bu, err := s.store.BUBySlug(r.Context(), t.ID, g.BU)
+			if err != nil {
+				httpx.WriteErr(w, 422, "unknown business unit "+g.BU)
+				return
+			}
+			gr.BUID = &bu.ID
+		default:
+			httpx.WriteErr(w, 422, "tenant-wide roles are "+strings.Join(identity.TenantRoles, ", ")+"; entity and business-unit roles are "+strings.Join(identity.ScopedRoles, ", "))
+			return
+		}
+		grants = append(grants, gr)
+	}
+	me := current(r)
+	if strings.EqualFold(me.Email, email) && !me.PlatformAdmin && !selfAdmin {
+		httpx.WriteErr(w, 422, "you cannot remove your own tenant_admin role; ask another tenant admin")
+		return
+	}
+	u, err := s.store.EnsureUser(r.Context(), email, "", false, me.Email)
+	if err != nil {
+		s.storeErr(w, err, "")
+		return
+	}
+	added, removed, err := s.store.SetUserRoles(r.Context(), t.ID, u.ID, grants, me.Email)
+	if err != nil {
+		s.storeErr(w, err, "")
+		return
+	}
+	if len(added)+len(removed) > 0 {
+		s.audit(r.Context(), me.Email, "member.roles", "user/"+email, t.Slug, map[string]any{"added": added, "removed": removed, "roles": b.Roles})
+	}
+	ms, err := s.store.TenantMembers(r.Context(), t.ID)
+	if err != nil {
+		s.storeErr(w, err, "")
+		return
+	}
+	out := []*Membership{}
+	for _, m := range ms {
+		if strings.EqualFold(m.Email, email) {
+			out = append(out, m)
+		}
+	}
+	httpx.WriteJSON(w, 200, out)
 }
 
 func (s *Server) removeMember(w http.ResponseWriter, r *http.Request) {

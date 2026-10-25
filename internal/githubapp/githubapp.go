@@ -337,8 +337,18 @@ func (a *App) GetPR(ctx context.Context, inst int64, repo string, n int) (*PR, e
 
 // Merge merges a pull request, only if its head is still sha.
 func (a *App) Merge(ctx context.Context, inst int64, repo string, n int, sha, title, message string) error {
-	return a.Do(ctx, inst, http.MethodPut, repoPath(repo)+"/pulls/"+strconv.Itoa(n)+"/merge",
-		map[string]string{"sha": sha, "merge_method": "squash", "commit_title": title, "commit_message": message}, nil)
+	_, err := a.MergeSHA(ctx, inst, repo, n, sha, title, message)
+	return err
+}
+
+// MergeSHA squash-merges like Merge and returns the merge commit.
+func (a *App) MergeSHA(ctx context.Context, inst int64, repo string, n int, sha, title, message string) (string, error) {
+	var out struct {
+		SHA string `json:"sha"`
+	}
+	err := a.Do(ctx, inst, http.MethodPut, repoPath(repo)+"/pulls/"+strconv.Itoa(n)+"/merge",
+		map[string]string{"sha": sha, "merge_method": "squash", "commit_title": title, "commit_message": message}, &out)
+	return out.SHA, err
 }
 
 // ---- self-service: branches, files and pull requests ----

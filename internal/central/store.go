@@ -553,3 +553,67 @@ func (s *Store) DeleteSlackApp(ctx context.Context, tenantID string) error {
 	_, err := s.Pool().Exec(ctx, `DELETE FROM tenant_slack WHERE tenant_id = $1`, tenantID)
 	return err
 }
+
+// Grant is one role of a person in a tenant: tenant-wide, on an entity, or on a BU.
+type Grant struct {
+	Role     string
+	EntityID *string
+	BUID     *string
+}
+
+// SetUserRoles makes a person's memberships in a tenant exactly grants, in one
+// transaction. It returns what was added and removed.
+func (s *Store) SetUserRoles(ctx context.Context, tenantID, userID string, grants []Grant, by string) (added, removed []string, err error) {
+	tx, err := s.Pool().Begin(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer tx.Rollback(ctx)
+	key := func(role string, e, b *string) string {
+		d := func(p *string) string {
+			if p == nil {
+				return ""
+			}
+			return *p
+		}
+		return role + "|" + d(e) + "|" + d(b)
+	}
+	want := map[string]Grant{}
+	for _, g := range grants {
+		want[key(g.Role, g.EntityID, g.BUID)] = g
+	}
+	rows, err := tx.Query(ctx, `SELECT id::text, role, entity_id::text, bu_id::text FROM memberships WHERE tenant_id = $1 AND user_id = $2 FOR UPDATE`, tenantID, userID)
+	if err != nil {
+		return nil, nil, err
+	}
+	have := map[string]string{}
+	for rows.Next() {
+		var id, role string
+		var e, b *string
+		if err := rows.Scan(&id, &role, &e, &b); err != nil {
+			rows.Close()
+			return nil, nil, err
+		}
+		have[key(role, e, b)] = id
+	}
+	rows.Close()
+	for k, id := range have {
+		if _, keep := want[k]; !keep {
+			if _, err := tx.Exec(ctx, `DELETE FROM memberships WHERE id = $1`, id); err != nil {
+				return nil, nil, err
+			}
+			removed = append(removed, k)
+		}
+	}
+	for k, g := range want {
+		if _, ok := have[k]; ok {
+			continue
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO memberships (user_id, tenant_id, entity_id, bu_id, role, created_by) VALUES ($1, $2, $3, $4, $5, $6)`,
+			userID, tenantID, g.EntityID, g.BUID, g.Role, by); err != nil {
+			return nil, nil, err
+		}
+		added = append(added, k)
+	}
+	return added, removed, tx.Commit(ctx)
+}

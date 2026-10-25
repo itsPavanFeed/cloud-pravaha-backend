@@ -35,8 +35,8 @@ type ReleaseSource struct {
 	APIURL      string `json:"api_url,omitempty"`
 	Auth        string `json:"auth,omitempty"` // token | github_app
 	PollSeconds int    `json:"poll_seconds"`
-	Enabled     bool   `json:"enabled"`     // build automatically on new commits (push webhook or poll)
-	AutoDeploy  bool   `json:"auto_deploy"` // deploy a successful build without a person
+	Enabled     bool   `json:"enabled"`   // build new commits and pull requests automatically (webhooks, or polling the branch)
+	Approvals   int    `json:"approvals"` // DevOps approvals needed to activate a release (0-5)
 }
 
 func (c ReleaseSource) gitConfig() contracts.Config {
@@ -79,7 +79,7 @@ func (s *Server) getReleaseSource(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) putReleaseSource(w http.ResponseWriter, r *http.Request) {
 	kind, ok := releaseKind(w, r)
-	if !ok || !tenantAdmin(w, r) {
+	if !ok || !tenantAdmin(w, r) { // only tenant admins decide where releases come from and how many approvals they need
 		return
 	}
 	var c ReleaseSource
@@ -87,6 +87,10 @@ func (s *Server) putReleaseSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	gc := c.gitConfig()
+	if c.Approvals < 0 || c.Approvals > 5 {
+		writeErr(w, 422, "invalid "+kind+" repository", "approvals must be between 0 and 5")
+		return
+	}
 	if err := gc.Validate(s.cfg.AllowLocalContracts); err != nil {
 		writeErr(w, 422, "invalid "+kind+" repository", errLines(err)...)
 		return
@@ -187,43 +191,18 @@ func (s *Server) getRelease(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) buildReleaseNow(w http.ResponseWriter, r *http.Request) {
 	kind, ok := releaseKind(w, r)
-	if !ok || !tenantAdmin(w, r) {
+	if !ok || !releaseEditor(w, r) {
 		return
 	}
-	rel, err := s.startBuild(r.Context(), kind, user(r).Actor())
+	rel, err := s.startBranchBuild(r.Context(), kind, user(r).Actor())
 	switch {
 	case errors.Is(err, store.ErrConflict):
-		writeErr(w, http.StatusConflict, "a "+kind+" build is already running")
+		writeErr(w, http.StatusConflict, "this commit is already built")
 	case err != nil:
 		writeErr(w, http.StatusBadGateway, err.Error())
 	default:
 		writeJSON(w, 202, rel)
 	}
-}
-
-func (s *Server) deployReleaseNow(w http.ResponseWriter, r *http.Request) {
-	kind, ok := releaseKind(w, r)
-	if !ok || !tenantAdmin(w, r) {
-		return
-	}
-	rel, err := s.store.GetRelease(r.Context(), r.PathValue("id"))
-	if err == nil && rel.Kind != kind {
-		err = store.ErrNotFound
-	}
-	if err != nil {
-		s.writeStoreErr(w, err, "")
-		return
-	}
-	out, err := s.deploy(r.Context(), rel, user(r).Actor())
-	if err != nil {
-		if errors.Is(err, store.ErrConflict) {
-			writeErr(w, http.StatusConflict, "a policy set of this release has the name of a set managed in the console")
-			return
-		}
-		writeErr(w, 422, "the release cannot be deployed", err.Error())
-		return
-	}
-	writeJSON(w, 200, out)
 }
 
 func (s *Server) bundleCacheStats(w http.ResponseWriter, r *http.Request) {
@@ -235,16 +214,22 @@ func (s *Server) bundleCacheStats(w http.ResponseWriter, r *http.Request) {
 
 // ---- building ----
 
-var buildMu sync.Mutex // one build of each kind at a time per replica (the database enforces it across replicas)
+var buildMu sync.Mutex // builds run one at a time per replica: they download modules and are heavy
 
-// startBuild records a build at the branch's current commit and runs it in
-// the background.
-func (s *Server) startBuild(ctx context.Context, kind, actor string) (*store.Release, error) {
-	c, ok := s.releaseSource(ctx, kind)
-	if !ok {
-		return nil, fmt.Errorf("no %s repository is configured", kind)
-	}
-	src, err := s.releaseGit(ctx, kind, c)
+// buildReq is one build: from the repository at a commit, or from files
+// assembled in the console (a change not committed yet).
+type buildReq struct {
+	kind, actor, rev string
+	origin           store.ReleaseOrigin
+	files            map[string][]byte // nil: read the repository at rev
+	// after runs once every check passed, before the release is marked ready:
+	// console changes are committed here, so only a change that builds is committed.
+	after func(ctx context.Context, rel *store.Release) error
+}
+
+// startBranchBuild builds the source branch's current commit.
+func (s *Server) startBranchBuild(ctx context.Context, kind, actor string) (*store.Release, error) {
+	c, src, err := s.releaseRepo(ctx, kind)
 	if err != nil {
 		return nil, err
 	}
@@ -252,20 +237,36 @@ func (s *Server) startBuild(ctx context.Context, kind, actor string) (*store.Rel
 	if err != nil {
 		return nil, err
 	}
-	rel, err := s.store.StartRelease(ctx, kind, rev, actor)
+	return s.startBuild(ctx, c, src, buildReq{kind: kind, actor: actor, rev: rev, origin: store.ReleaseOrigin{Origin: "branch", Ref: c.Branch, Title: "branch " + c.Branch}})
+}
+
+func (s *Server) releaseRepo(ctx context.Context, kind string) (*ReleaseSource, contracts.Source, error) {
+	c, ok := s.releaseSource(ctx, kind)
+	if !ok {
+		return nil, nil, fmt.Errorf("no %s repository is configured", kind)
+	}
+	src, err := s.releaseGit(ctx, kind, c)
+	return c, src, err
+}
+
+// startBuild records a build and runs it in the background.
+func (s *Server) startBuild(ctx context.Context, c *ReleaseSource, src contracts.Source, b buildReq) (*store.Release, error) {
+	rel, err := s.store.StartRelease(ctx, b.kind, b.rev, b.actor, b.origin)
 	if err != nil {
 		return nil, err
 	}
-	s.audit(ctx, actor, "release.build", "releases/"+kind+"/"+strconv.Itoa(rel.Number), "", map[string]string{"revision": rev, "repo": c.Repo})
+	s.audit(ctx, b.actor, "release.build", "releases/"+b.kind+"/"+strconv.Itoa(rel.Number), "",
+		map[string]any{"revision": b.rev, "repo": c.Repo, "origin": b.origin.Origin, "pr": b.origin.PRNumber})
+	s.releaseStatus(ctx, c, rel, "pending", "building release "+strconv.Itoa(rel.Number))
 	go func() {
 		bctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Minute)
 		defer cancel()
-		s.runBuild(bctx, rel, c, src)
+		s.runBuild(bctx, rel, c, src, b)
 	}()
 	return rel, nil
 }
 
-func (s *Server) runBuild(ctx context.Context, rel *store.Release, c *ReleaseSource, src contracts.Source) {
+func (s *Server) runBuild(ctx context.Context, rel *store.Release, c *ReleaseSource, src contracts.Source, b buildReq) {
 	buildMu.Lock()
 	defer buildMu.Unlock()
 	fail := func(msg string, checks []release.Check) {
@@ -274,13 +275,19 @@ func (s *Server) runBuild(ctx context.Context, rel *store.Release, c *ReleaseSou
 			cj = []byte("[]")
 		}
 		s.store.FinishRelease(ctx, rel.ID, "failed", cj, nil, "", 0, nil, "", msg)
+		rel.Status, rel.Error = "failed", msg
+		s.releaseStatus(ctx, c, rel, "failure", msg)
+		s.releaseComment(ctx, c, rel, checks)
 		s.notifyEvent(ctx, store.Notification{Kind: "release.failed", Severity: "error",
 			Title: fmt.Sprintf("%s release %d failed", releaseTitle(rel.Kind), rel.Number), Body: msg, Link: "settings/releases/" + rel.Kind})
 	}
-	files, err := src.Files(ctx, rel.Revision)
-	if err != nil {
-		fail("reading the repository failed: "+err.Error(), nil)
-		return
+	files := b.files
+	if files == nil {
+		var err error
+		if files, err = src.Files(ctx, rel.Revision); err != nil {
+			fail("reading the repository failed: "+err.Error(), nil)
+			return
+		}
 	}
 	var res *release.Result
 	if rel.Kind == release.Modules {
@@ -309,6 +316,13 @@ func (s *Server) runBuild(ctx context.Context, rel *store.Release, c *ReleaseSou
 		fail("check failed: "+failed, res.Checks)
 		return
 	}
+	if b.after != nil {
+		if err := b.after(ctx, rel); err != nil {
+			fail("the change built, but committing it failed: "+err.Error(), res.Checks)
+			return
+		}
+		res.Manifest.Revision = rel.Revision
+	}
 	man, _ := json.Marshal(res.Manifest)
 	var inline []byte
 	object := ""
@@ -325,21 +339,13 @@ func (s *Server) runBuild(ctx context.Context, rel *store.Release, c *ReleaseSou
 		s.log.Error("recording a release failed", "release", rel.ID, "err", err)
 		return
 	}
+	rel.Status = "ready"
 	s.audit(ctx, "system:releases", "release.ready", "releases/"+rel.Kind+"/"+strconv.Itoa(rel.Number), "", map[string]any{"sha256": res.SHA256, "size": len(res.Bundle)})
-	if c.AutoDeploy {
-		full, err := s.store.GetRelease(ctx, rel.ID)
-		if err == nil {
-			_, err = s.deploy(ctx, full, "system:auto-deploy")
-		}
-		if err != nil {
-			s.notifyEvent(ctx, store.Notification{Kind: "release.failed", Severity: "error",
-				Title: fmt.Sprintf("%s release %d built but was not deployed", releaseTitle(rel.Kind), rel.Number), Body: err.Error(), Link: "settings/releases/" + rel.Kind})
-		}
-		return
-	}
+	s.releaseStatus(ctx, c, rel, "pending", fmt.Sprintf("release %d built; waiting for activation (DevOps approval)", rel.Number))
+	s.releaseComment(ctx, c, rel, res.Checks)
 	s.notifyEvent(ctx, store.Notification{Kind: "release.ready", Severity: "action",
-		Title: fmt.Sprintf("%s release %d is ready to deploy", releaseTitle(rel.Kind), rel.Number),
-		Body:  fmt.Sprintf("Built from %s and every check passed.", rel.Revision[:min(7, len(rel.Revision))]), Link: "settings/releases/" + rel.Kind})
+		Title: fmt.Sprintf("%s release %d is ready", releaseTitle(rel.Kind), rel.Number),
+		Body:  fmt.Sprintf("%s · every check passed. Request activation to have DevOps approve it.", rel.Title), Link: "settings/releases/" + rel.Kind + "/" + rel.ID})
 }
 
 // ---- deploying ----
@@ -495,10 +501,11 @@ func (s *Server) buildIfMoved(ctx context.Context, kind string) {
 		s.log.Warn("checking the release repository failed", "kind", kind, "err", err)
 		return
 	}
-	if rels, err := s.store.ListReleases(ctx, kind, 1); err == nil && len(rels) > 0 && rels[0].Revision == rev {
-		return
+	if built, err := s.store.ReleaseBuilt(ctx, kind, rev); err != nil || built {
+		return // already built, or the merge commit of a release the platform activated
 	}
-	if _, err := s.startBuild(ctx, kind, "system:releases"); err != nil && !errors.Is(err, store.ErrConflict) {
+	if _, err := s.startBuild(ctx, c, src, buildReq{kind: kind, actor: "system:releases", rev: rev,
+		origin: store.ReleaseOrigin{Origin: "branch", Ref: c.Branch, Title: "branch " + c.Branch}}); err != nil && !errors.Is(err, store.ErrConflict) {
 		s.log.Warn("starting a release build failed", "kind", kind, "err", err)
 	}
 }

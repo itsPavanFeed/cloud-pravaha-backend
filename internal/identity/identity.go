@@ -5,7 +5,8 @@
 // Hierarchy: tenant > entity (a company) > business unit (a product). Roles:
 //
 //	platform  platform_admin                           every tenant (see below)
-//	tenant    tenant_admin, finops, security, auditor   whole tenant
+//	tenant    tenant_admin, finops, security, devops,   whole tenant
+//	          auditor
 //	entity    admin, manager, developer, viewer         every BU of that entity
 //	bu        admin, manager, developer, viewer         one business unit
 //
@@ -38,6 +39,9 @@ const (
 	FinOps      = "finops"
 	Security    = "security"
 	Auditor     = "auditor"
+	// DevOps approves activating module and policy releases. Platform admins
+	// do not hold it implicitly: approvals always need an explicit grant.
+	DevOps = "devops"
 
 	Admin     = "admin"
 	Manager   = "manager"
@@ -46,7 +50,7 @@ const (
 )
 
 var (
-	TenantRoles = []string{TenantAdmin, FinOps, Security, Auditor}
+	TenantRoles = []string{TenantAdmin, FinOps, Security, DevOps, Auditor}
 	// ScopedRoles are granted on an entity (inherited by its BUs) or on one BU.
 	ScopedRoles = []string{Admin, Manager, Developer, Viewer}
 	SlugRe      = regexp.MustCompile(`^[a-z][a-z0-9-]{1,31}$`)
@@ -97,7 +101,7 @@ func (p *Principal) KnownBU(bu string) bool { _, ok := p.BUEntity[bu]; return ok
 
 // SeesAllBUs: tenant-wide roles read every business unit.
 func (p *Principal) SeesAllBUs() bool {
-	return p.HasTenantRole(TenantAdmin, FinOps, Security, Auditor)
+	return p.HasTenantRole(TenantAdmin, FinOps, Security, DevOps, Auditor)
 }
 
 // CanView reports whether p may read a BU's stacks, runs and environments.

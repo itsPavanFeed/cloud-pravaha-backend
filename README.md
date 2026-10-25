@@ -126,7 +126,14 @@ The platform builds what the tenant keeps in Git into **releases** and deploys t
 3. **Pin nested modules:** starting from what each kind loads, nested registry modules are rewritten to vendored, approved versions (the highest approved version that satisfies the module's own constraint). Any other source (git, http, s3) fails the build, and configuration nothing loads is left out of the bundle.
 4. **Check:** no loaded module runs commands (provisioners, the external data source), and every kind's inputs, baseline keys and outputs exist in each module version.
 5. **Bundle and store:** one deterministic tarball named by its SHA-256, in the tenant bucket (S3, MinIO, GCS) or PostgreSQL, with a manifest carrying the catalog, this tenant's defaults and the package index.
-6. **Deploy, roll back:** a tenant admin deploys a ready release (or `auto_deploy` does); deploying an older release is a rollback. The defaults deploy with the release, so after a deploy nothing reads the modules repository or the registry until the next build.
+6. **Activate, roll back:** someone (tenant admin or DevOps) requests activating a built release; it activates once enough people with the `devops` role approve (`approvals` on the source, 0–5; the requester and the author of a console change never count). Requesting an older release is a rollback. The defaults deploy with the release, so after activation nothing reads the modules repository or the registry until the next build.
+
+Releases come from two flows:
+
+- **Git first.** With `enabled`, every pull request to the source branch (and every push to it) is built automatically through the GitHub App webhooks. The pull request gets a `pravaha/release-<kind>` commit status and one comment with the checks. A new commit retires the pull request's older builds; closing it unmerged retires them all; forks and drafts are never built.
+- **Console first.** Editing a kind, the tenant's defaults for a kind, or a policy set in the console (`POST /releases/{kind}/changes`) builds the change on top of the branch at once. Only a change that builds is committed: to a new branch with a pull request (GitHub App), or straight into the folder for the development-only `local` provider.
+
+**Activating a release built from a pull request squash-merges it**, and only if the pull request's head is still the commit that was built; the merge commit is not built again. If the merge fails the release stays active and the console offers to merge again.
 
 Runs then use **only** the deployed release: the generated config loads modules from `vendor/` and lists each package it needs with its checksum. The runner downloads the bundle once, extracts only those packages, verifies every checksum, and `tofu init` downloads no module from the internet. Because the config pins packages rather than release numbers, a deploy makes a waiting plan stale only if the modules that stack loads actually changed.
 
@@ -134,7 +141,13 @@ Runs then use **only** the deployed release: the generated config loads modules 
 
 **Caching.** Bundles are immutable and content-addressed. The tenant plane keeps them in memory (`PRAVAHA_BUNDLE_CACHE_MEMORY_MB`, default 256) and on disk (`PRAVAHA_BUNDLE_CACHE_DIR`, `PRAVAHA_BUNDLE_CACHE_DISK_MB`), runners keep their own disk cache, every copy is verified against its checksum when loaded, and concurrent misses share one read, so the bucket or database is read once per bundle. `GET /releases/cache` shows the hit counts.
 
-API: `GET/PUT /releases/{modules|policies}/source`, `PUT …/source/token`, `POST …/builds`, `GET /releases/{kind}`, `GET /releases/{kind}/{id}`, `POST /releases/{kind}/{id}/deploy`. Builds also start on a GitHub push to the source branch, or by polling, when `enabled` is set.
+API: `GET/PUT /releases/{modules|policies}/source`, `PUT …/source/token`, `POST …/builds`, `GET …/files?path=`, `POST …/changes`, `GET /releases/{kind}`, `GET /releases/{kind}/{id}`, `POST /releases/{kind}/{id}/request|approve|reject|override|merge`.
+
+## Approvals page and overrides
+
+The console's **Approvals** page lists everything waiting for a decision: plans that need manager, FinOps or Security signatures, and releases waiting for DevOps. Each shows who raised it, the steps already signed, and the people who can sign each remaining step (from `GET /api/v1/tenants/{t}/approvers` on central, which lists only approving roles).
+
+People with the `devops` role can **override** a waiting plan or release, with a reason. A plan's remaining steps are recorded as `override:<who>:<step>`, a release records an `override` decision, both are audited (`run.override`, `release.override`) and announced. Overrides never bypass policy: only plans that passed policy can be overridden, and stale plans are still discarded.
 
 ## GitHub App and webhooks
 

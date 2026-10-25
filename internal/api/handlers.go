@@ -607,16 +607,7 @@ func (s *Server) approveRun(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreErr(w, err, "")
 		return
 	}
-	gen, _, probs := s.build(r.Context(), st.Name, st.BU, env, runSpec(st, run))
-	_, serial, serr := s.store.CurrentState(r.Context(), st.ID)
-	stale := ""
-	switch {
-	case probs != nil || gen.Hash != run.ConfigHash:
-		stale = "the stack or environment changed after this plan was made"
-	case serr != nil || run.StateSerial == nil || serial != *run.StateSerial:
-		stale = "the stack's state changed after this plan was made"
-	}
-	if stale != "" {
+	if stale := s.planStale(r.Context(), run, st, env); stale != "" {
 		s.store.Discard(r.Context(), run.ID, "stale plan: "+stale)
 		s.engine.Finished(r.Context(), run.ID)
 		s.audit(r.Context(), p.Actor(), "run.discard", "run/"+run.ID, run.BU, map[string]string{"reason": "stale plan: " + stale})
@@ -650,6 +641,88 @@ func (s *Server) approveRun(w http.ResponseWriter, r *http.Request) {
 		s.notifyRun(r.Context(), run, "run.awaiting_approval", "action", fmt.Sprintf("%s approved %s; still needs %s", p.Subject, run.StackName, strings.Join(left, ", ")),
 			"Plan "+short(deref(run.PlanSHA256))+" in "+run.Environment+".", left)
 	}
+	writeJSON(w, 200, run)
+}
+
+// planStale reports why a plan can no longer be applied, or "".
+func (s *Server) planStale(ctx context.Context, run *store.Run, st *store.Stack, env *store.Environment) string {
+	gen, _, probs := s.build(ctx, st.Name, st.BU, env, runSpec(st, run))
+	_, serial, serr := s.store.CurrentState(ctx, st.ID)
+	switch {
+	case probs != nil || gen.Hash != run.ConfigHash:
+		return "the stack or environment changed after this plan was made"
+	case serr != nil || run.StateSerial == nil || serial != *run.StateSerial:
+		return "the stack's state changed after this plan was made"
+	}
+	return ""
+}
+
+// overrideRun lets DevOps sign every remaining approval step of a plan at
+// once, with a reason. Each step is recorded as "override:<who>:<step>" so the
+// audit trail and the run show exactly what was bypassed. Policy is never
+// bypassed: only plans that passed policy can be overridden.
+func (s *Server) overrideRun(w http.ResponseWriter, r *http.Request) {
+	p := user(r)
+	if !p.HasTenantRole(identity.DevOps) {
+		writeErr(w, http.StatusForbidden, "overriding approvals needs the devops role")
+		return
+	}
+	run := s.visibleRun(w, r)
+	if run == nil {
+		return
+	}
+	var b struct {
+		Reason string `json:"reason"`
+	}
+	if !decode(w, r, &b) {
+		return
+	}
+	if strings.TrimSpace(b.Reason) == "" || len(b.Reason) > reasonMax {
+		writeErr(w, 422, "an override needs a reason")
+		return
+	}
+	if run.Status != "planned" {
+		writeErr(w, http.StatusConflict, "only plans waiting for approval can be overridden (status is "+run.Status+")")
+		return
+	}
+	var pr policy.Result
+	if json.Unmarshal(run.PolicyResult, &pr) != nil || !pr.Passed {
+		writeErr(w, http.StatusConflict, "the plan did not pass policy; policy cannot be overridden")
+		return
+	}
+	st, err := s.store.GetStack(r.Context(), run.StackID)
+	if err != nil {
+		s.writeStoreErr(w, err, "")
+		return
+	}
+	env, err := s.store.GetEnvironment(r.Context(), st.EnvironmentID)
+	if err != nil {
+		s.writeStoreErr(w, err, "")
+		return
+	}
+	if stale := s.planStale(r.Context(), run, st, env); stale != "" {
+		s.store.Discard(r.Context(), run.ID, "stale plan: "+stale)
+		s.engine.Finished(r.Context(), run.ID)
+		writeErr(w, http.StatusConflict, "plan is stale and was discarded: "+stale+"; start a new run")
+		return
+	}
+	left := remainingSteps(run)
+	complete := false
+	for _, step := range left {
+		if complete, err = s.store.Approve(r.Context(), run.ID, step, "override:"+p.Subject+":"+step, "override: "+b.Reason); err != nil {
+			s.writeStoreErr(w, err, "")
+			return
+		}
+	}
+	s.audit(r.Context(), p.Actor(), "run.override", "run/"+run.ID, run.BU, map[string]any{
+		"stack": st.Name, "steps": left, "reason": b.Reason, "plan_sha256": deref(run.PlanSHA256)})
+	if complete {
+		s.engine.Approved(r.Context(), run.ID)
+		s.notify()
+	}
+	run, _ = s.store.GetRun(r.Context(), run.ID)
+	s.notifyRun(r.Context(), run, "run.overridden", "warning", fmt.Sprintf("Approvals overridden: %s is being applied", run.StackName),
+		fmt.Sprintf("%s overrode %s: %s", p.Subject, strings.Join(left, ", "), b.Reason), nil)
 	writeJSON(w, 200, run)
 }
 

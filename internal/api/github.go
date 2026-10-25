@@ -509,6 +509,9 @@ func (s *Server) handleGitHubEvent(ctx context.Context, d *store.WebhookDelivery
 		}()
 		return "processed", "contracts sync started for " + cc.Branch
 	case "pull_request":
+		if handled, outcome, detail := s.releasePullRequest(ctx, d.Repo, d.Action, body); handled {
+			return outcome, detail
+		}
 		cc, ok := s.contractsConfig(ctx)
 		if !ok || cc.Provider != "github" || !strings.EqualFold(cc.Repo, d.Repo) {
 			return "ignored", "not the contracts repository"
