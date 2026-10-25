@@ -27,7 +27,8 @@ func (s *Server) secretStore(ctx context.Context) *spec.Vault {
 
 func (s *Server) getSecretStore(w http.ResponseWriter, r *http.Request) {
 	v := s.secretStore(r.Context())
-	resp := map[string]any{"configured": v != nil, "issuer": s.cfg.PublicURL, "jwks_url": strings.TrimRight(s.cfg.PublicURL, "/") + "/.well-known/jwks.json"}
+	resp := map[string]any{"configured": v != nil, "issuer": s.cfg.PublicURL, "jwks_url": strings.TrimRight(s.cfg.PublicURL, "/") + "/.well-known/jwks.json",
+		"public_key_pem": s.issuer.PublicKeyPEM(), "audience": (&spec.Vault{}).TokenAudience()}
 	if v != nil {
 		resp["config"] = v
 		resp["audience"] = v.TokenAudience()

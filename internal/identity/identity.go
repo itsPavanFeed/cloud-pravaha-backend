@@ -6,7 +6,7 @@
 //
 //	platform  platform_admin                           every tenant (see below)
 //	tenant    tenant_admin, finops, security, devops,   whole tenant
-//	          auditor
+//	          auditor                                   (tenant_admin and devops: full control)
 //	entity    admin, manager, developer, viewer         every BU of that entity
 //	bu        admin, manager, developer, viewer         one business unit
 //
@@ -79,8 +79,21 @@ func (p *Principal) HasTenantRole(roles ...string) bool {
 		if contains(p.TenantRoles, r) || p.PlatformAdmin && contains(platformImplied, r) {
 			return true
 		}
+		// tenant_admin and devops both have full control of the tenant.
+		if (r == TenantAdmin || r == DevOps) && p.FullControl() {
+			return true
+		}
 	}
 	return false
+}
+
+// FullControl: tenant admins and DevOps can do anything in the tenant:
+// manage it, author stacks in every business unit, sign every approval step
+// and approve or override releases. Separation of duties still holds per
+// action (nobody signs their own run, one person signs one step); an
+// override with a reason is the recorded way past it.
+func (p *Principal) FullControl() bool {
+	return contains(p.TenantRoles, TenantAdmin) || contains(p.TenantRoles, DevOps)
 }
 
 // HasBURole checks effective roles in a business unit.
@@ -126,7 +139,7 @@ func (p *Principal) VisibleBUs() []string {
 
 // CanChange: create or edit stacks and queue or discard runs.
 func (p *Principal) CanChange(bu string) bool {
-	return p.PlatformAdmin || p.HasBURole(bu, Admin, Developer)
+	return p.PlatformAdmin || p.FullControl() || p.HasBURole(bu, Admin, Developer)
 }
 
 // CanManageEnvironments: an entity's environments, which all of its business
@@ -213,6 +226,9 @@ const (
 var Steps = []string{StepManager, StepFinOps, StepSecurity}
 
 func (p *Principal) CanApprove(step, bu string) bool {
+	if p.FullControl() && (step == StepManager || step == StepFinOps || step == StepSecurity) {
+		return true
+	}
 	switch step {
 	case StepManager:
 		return p.HasBURole(bu, Manager)

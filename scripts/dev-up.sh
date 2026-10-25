@@ -37,6 +37,16 @@ sleep 1
 
 # Temporal orchestrates each run's lifecycle (UI on http://localhost:8233).
 # DEV_TEMPORAL=0 uses the built-in database scheduler instead.
+# OpenBao for secret references (dev mode: in memory, root token dev-root). DEV_OPENBAO=0 skips it.
+BAO_NAME=pravaha-dev-openbao
+if [[ "${DEV_OPENBAO:-1}" != 0 ]]; then
+  if ! docker ps --format '{{.Names}}' | grep -qx "$BAO_NAME"; then
+    docker rm -f "$BAO_NAME" >/dev/null 2>&1 || true
+    docker run -d --name "$BAO_NAME" --cap-add=IPC_LOCK -p 127.0.0.1:8200:8200 \
+      -e BAO_DEV_ROOT_TOKEN_ID=dev-root -e BAO_DEV_LISTEN_ADDRESS=0.0.0.0:8200 openbao/openbao:latest server -dev >/dev/null
+  fi
+  for _ in $(seq 1 30); do curl -fsS http://127.0.0.1:8200/v1/sys/health >/dev/null 2>&1 && break; sleep 1; done
+fi
 TEMPORAL_NAME=pravaha-dev-temporal
 if [[ "${DEV_TEMPORAL:-1}" != 0 ]]; then
   if ! docker ps --format '{{.Names}}' | grep -qx "$TEMPORAL_NAME"; then
@@ -183,6 +193,28 @@ RUNNER_TOKEN=$(grep '^RUNNER_TOKEN=' "$DEV/tokens.env" | cut -d= -f2)
 # A private copy of the modules repository for releases, so edits made in the
 # console never touch your working copy.
 if [[ ! -d "$DEV/modules-repo" ]]; then cp -R "$ROOT/cloud-pravaha-modules" "$DEV/modules-repo"; fi
+# Configure OpenBao to trust acme's issuer and use it as acme's secret store.
+BAO_STATUS="off"
+if [[ "${DEV_OPENBAO:-1}" != 0 ]] && curl -fsS http://127.0.0.1:8200/v1/sys/health >/dev/null 2>&1; then
+  ADMIN=$(sed -n 's/^ROOT=\([^ ]*\).*/\1/p' "$DEV/tokens.env")
+  PEM=$(curl -fsS -H "Authorization: Bearer $ADMIN" "$CENTRAL/api/v1/t/acme/integrations/secret-store" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("public_key_pem",""))' || true)
+  bx() { docker exec -i -e BAO_ADDR=http://127.0.0.1:8200 -e BAO_TOKEN=dev-root "$BAO_NAME" bao "$@"; }
+  if [[ -n "$PEM" ]] && {
+    bx secrets list | grep '^kv/' >/dev/null || bx secrets enable -path=kv kv-v2 >/dev/null
+  } && printf 'path "kv/data/*" { capabilities = ["read"] }\n' | bx policy write pravaha-read - >/dev/null && {
+    bx auth list | grep '^jwt/' >/dev/null || bx auth enable -path=jwt jwt >/dev/null
+  } && printf '%s\n' "$PEM" | docker exec -i "$BAO_NAME" sh -c 'cat > /tmp/issuer.pem' \
+    && bx write auth/jwt/config bound_issuer="https://localhost:$TP" jwt_validation_pubkeys=@/tmp/issuer.pem >/dev/null \
+    && printf '%s' '{"role_type":"jwt","user_claim":"sub","bound_audiences":["pravaha-vault"],"bound_claims_type":"glob","bound_claims":{"sub":"pravaha:entity:*"},"token_ttl":"15m","token_policies":["pravaha-read"]}' \
+         | bx write auth/jwt/role/pravaha - >/dev/null \
+    && bx kv put kv/payments/demo password=dev-only-value >/dev/null \
+    && curl -fsS -o /dev/null -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' -X PUT "$CENTRAL/api/v1/t/acme/integrations/secret-store" \
+         --data-binary '{"address":"http://127.0.0.1:8200","role":"pravaha"}'; then
+    BAO_STATUS="http://127.0.0.1:8200 (root token dev-root; CLI: ./scripts/bao) · sample secret vault://kv/payments/demo#password"
+  else
+    echo "configuring OpenBao failed; secret references are unavailable in this dev stack" >&2
+  fi
+fi
 # Point module releases at the local modules checkout (once): Tenant settings → Releases → Build now.
 ADMIN=$(sed -n 's/^ROOT=\([^ ]*\).*/\1/p' "$DEV/tokens.env")
 if ! curl -fsS -H "Authorization: Bearer $ADMIN" "$CENTRAL/api/v1/t/acme/releases/modules/source" 2>/dev/null | grep -q '"repo"'; then
@@ -210,6 +242,7 @@ cat <<EOT
     FIONA  finops (tenant): signs finops
     SAM    security (tenant): signs security         EVE    developer, BU Data: cannot see Retail
     AVA    auditor   TINA tenant admin   ROOT platform admin   DORA devops (approves releases)
+  OpenBao: $BAO_STATUS
   Temporal: ${PRAVAHA_TEMPORAL_ADDRESS:-off (built-in scheduler)}${PRAVAHA_TEMPORAL_ADDRESS:+ · UI http://localhost:8233}
   Logs in $DEV/*.log.  Ctrl-C to stop (PostgreSQL and Temporal keep running: docker rm -f $PG_NAME $TEMPORAL_NAME).
 

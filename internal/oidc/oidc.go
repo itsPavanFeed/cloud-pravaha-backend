@@ -16,6 +16,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"math/big"
@@ -127,6 +128,16 @@ func (i *Issuer) Verify(tok string, now time.Time) (map[string]any, error) {
 		return nil, errors.New("token expired")
 	}
 	return claims, nil
+}
+
+// PublicKeyPEM is the signing key in PEM form, for verifiers that cannot
+// fetch the JWKS (for example OpenBao's jwt_validation_pubkeys).
+func (i *Issuer) PublicKeyPEM() string {
+	der, err := x509.MarshalPKIXPublicKey(&i.key.PublicKey)
+	if err != nil {
+		return ""
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}))
 }
 
 func (i *Issuer) JWKS() []byte {

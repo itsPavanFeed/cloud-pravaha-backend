@@ -41,7 +41,7 @@ Cloud Pravaha is a multi-tenant OpenTofu platform that deploys only **pinned pub
 - **Data residency.** Central stores identity and the directory only. Stacks, plans, state and run logs stay in each tenant's own database, and optionally in the tenant's own bucket for state and plans.
 - **Roles.**
   - **Platform:** `platform_admin` onboards tenants and holds everything `tenant_admin` and `auditor` have in every tenant. A platform admin also sees every business unit and can author stacks and runs in any of them, but signs approvals only with an explicit manager, FinOps or Security role. Their actions are audited as `platform-admin:<email>`.
-  - **Tenant-wide:** `tenant_admin`, `finops`, `security`, `auditor`. They see every entity.
+  - **Tenant-wide:** `tenant_admin`, `devops`, `finops`, `security`, `auditor`. They see every entity. `tenant_admin` and `devops` have **full control**: they manage the tenant, author stacks in every BU, sign every approval step, approve releases and override approvals. Separation of duties still holds per action (nobody signs their own run, one person signs one step, nobody approves their own release request); an override with a reason is the recorded way past it.
   - **Per entity or per BU:** `admin`, `manager`, `developer`, `viewer`. Roles granted on an entity are inherited by all its BUs. Members see only their BUs, and other BUs' resources answer 404.
 - **Risk and approvals.** Each plan is classified, and the risk decides which approvals it needs. Each step must be signed by a different person, and never by the run's author.
 
@@ -115,7 +115,8 @@ Secrets never go in Git or the platform's database. A contract passes `secretRef
 
 - **No stored Vault credentials.** The tenant configures only the address, the JWT auth mount and the role (Integrations → Secret store, `PUT /integrations/secret-store`). Runs log in with their own short-lived token from the tenant's OIDC issuer, issued for the store's own audience (default `pravaha-vault`), so a cloud token can never be replayed against Vault or the other way round. The `sub` claim names the entity, environment, stack and phase, so Vault policies can be scoped exactly.
 - **Sensitive inputs** (marked `sensitive: true` in a kind) accept only a secretRef; literal values that look like credentials (cloud keys, private keys, JWTs, tokens) are refused everywhere.
-- Values read from the store end up in state and saved plans, which are always encrypted.
+- Values read from the store end up in state and saved plans, which are always encrypted. (Vault provider 5.x prefers its ephemeral secret resource, which keeps values out of state, but ephemeral values can only feed write-only or ephemeral module inputs, which the public modules in the catalog do not declare yet.)
+- **Development:** `scripts/dev-up.sh` runs an OpenBao dev server (`http://127.0.0.1:8200`, root token `dev-root`), configures JWT auth for the tenant's issuer, a read-only policy and a sample secret `vault://kv/payments/demo#password`, and sets it as acme's secret store. `./scripts/bao …` runs the CLI inside that container (`DEV_OPENBAO=0` skips it all).
 
 ## Module and policy releases
 

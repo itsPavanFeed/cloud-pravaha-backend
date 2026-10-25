@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Runs the OpenBao CLI inside the dev stack's OpenBao container, so `bao`
+# works without installing it (brew install openbao installs it for real).
+#   ./scripts/bao kv get kv/payments/demo
+# BAO_ADDR and BAO_TOKEN default to the dev server (http://127.0.0.1:8200, dev-root).
+set -euo pipefail
+exec docker exec -i -e BAO_ADDR="${BAO_ADDR:-http://127.0.0.1:8200}" -e BAO_TOKEN="${BAO_TOKEN:-dev-root}" pravaha-dev-openbao bao "$@"
