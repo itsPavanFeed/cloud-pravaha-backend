@@ -37,6 +37,8 @@ spec:
             - { name: PRAVAHA_RUNNER_CONCURRENCY, value: {{ .Values.runner.concurrency | quote }} }
             - { name: PRAVAHA_CA_FILE, value: /tls/ca.crt }
             - { name: PRAVAHA_RUNNER_NAME, valueFrom: { fieldRef: { fieldPath: metadata.name } } }
+            - { name: PRAVAHA_BUNDLE_CACHE_DIR, value: /tmp/bundles } # module release bundles, kept between runs
+            - { name: PRAVAHA_BUNDLE_CACHE_DISK_MB, value: {{ .Values.runner.bundleCacheMB | quote }} }
           securityContext: {{- include "pravaha.securityContext" . | nindent 12 }}
           resources: {{- toYaml .Values.runner.resources | nindent 12 }}
           volumeMounts:

@@ -159,13 +159,16 @@ func CatalogDocs(cat *catalog.Catalog) []Doc {
 	var docs []Doc
 	for _, m := range cat.Modules {
 		var b strings.Builder
-		fmt.Fprintf(&b, "Catalog module %q (%s). Cloud: %s. Registry source: %s. Approved versions: %s (default %s).\n%s\n",
-			m.ID, m.Title, cloudName(m.Cloud), m.Source, strings.Join(m.Versions, ", "), m.LatestVersion(), m.Description)
+		fmt.Fprintf(&b, "Kind %s: catalog module %q (%s). Cloud: %s. Registry source: %s. Approved versions: %s (default %s).\n%s\n",
+			m.Kind, m.ID, m.Title, cloudName(m.Cloud), m.Source, strings.Join(m.Versions, ", "), m.LatestVersion(), m.Description)
 		b.WriteString("Inputs a stack may set:\n")
 		for _, in := range m.Inputs {
 			fmt.Fprintf(&b, "- %s (%s", in.Name, in.Type)
 			if in.Required {
 				b.WriteString(", required")
+			}
+			if in.Sensitive {
+				b.WriteString(", sensitive: secret reference only")
 			}
 			if in.Default != nil {
 				d, _ := json.Marshal(in.Default)

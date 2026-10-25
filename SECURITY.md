@@ -47,6 +47,11 @@ The mapping helps your own audit evidence. It is not a certification: SOC 2, ISO
 | 37 | **Apply before merge.** Pull-request plans apply exactly the pull request's spec, carried with the run and re-checked at approval and apply. Plans of superseded commits or closed pull requests are discarded and cannot be approved. The platform merges only after every changed stack applied, pinned to the applied commit. Fork pull requests are never planned. Branch protection on `pravaha/apply` prevents earlier merges | `api/pullrequests.go` | e2e (fake GitHub) |
 | 38 | **Slack approvals are the person's approvals.** Central verifies the Slack signature with a five-minute replay window. It maps the Slack user to a Cloud Pravaha user by verified email and acts with that user's assertion, so roles, separation of duties and the audit trail are those of the console. The Slack app's secrets are sealed on central. Replies are only ever posted back to Slack hosts | `central/slack.go` | `slack_test.go`, e2e (fake Slack) |
 | 39 | **Run isolation and limits.** Concurrent runs on one runner each get their own work directory and TMPDIR, deleted afterwards. Provider installs are serialised over the shared plugin cache. Environments cap creates, imports and deletes per run | `internal/runner`, `internal/policy` | `policy_test.go`, e2e |
+| 40 | **No secrets in Git.** Contracts reference secrets (`vault://mount/path#key`); runs read them from OpenBao/Vault at plan time with their own short-lived token, issued for the store's audience only. No Vault credential is stored. Sensitive inputs accept only references, and credential-shaped literals are refused. | `internal/spec`, `internal/api/secrets.go` |
+| 41 | **Strict YAML.** Anchors, aliases, merge keys, custom tags, binary scalars, duplicate keys, non-finite numbers and unknown fields are refused; size and depth are bounded. A stack with any problem is never partly applied. | `internal/yamlx`, `internal/contracts` |
+| 42 | **Generated HCL cannot be injected.** Values are written as literals with `hclwrite`, which escapes template sequences; expressions are built only from validated names. | `internal/spec/hcl.go` |
+| 43 | **Supply chain at release time.** Module releases vendor every approved package pinned to the registry's commit, rewrite nested modules to approved vendored versions, refuse other sources and command execution, drop unloaded configuration, and check kinds against module variables. Policy releases compile every set and run its tests. Releases are immutable and named by SHA-256; deploys and rollbacks are audited. | `internal/release` |
+| 44 | **Runs never download modules.** A run receives the release bundle's checksum and the checksum of every package it loads (part of the config hash). The runner verifies both before `tofu init`; caches on the tenant plane and runners re-verify every copy they load. | `internal/runner`, `internal/bundlecache` |
 
 ## Compliance mapping
 
@@ -76,7 +81,8 @@ The mapping helps your own audit evidence. It is not a certification: SOC 2, ISO
 - Run each PostgreSQL (central and every tenant) with encryption at rest, backups and network isolation, and export the audit logs to your SIEM.
 - Issue central's mTLS client certificate from a dedicated CA, and give tenant planes only that CA as `PRAVAHA_CENTRAL_CLIENT_CA`.
 - Grant cloud roles only what your catalog modules need. Scope trust policies to environment and stack subjects.
-- Review catalog changes in `cloud-pravaha-modules` through pull requests with required reviewers.
+- Review catalog and tenant-default changes in `cloud-pravaha-modules`, and policy changes, through pull requests with required reviewers; deploy releases deliberately (leave `auto_deploy` off for production tenants).
+- Configure the Vault/OpenBao JWT role to trust only the tenant's issuer and audience, and bind its policies to the `sub` claim (entity, environment, stack, phase).
 
 ## Reporting a vulnerability
 

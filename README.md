@@ -1,6 +1,6 @@
 # cloud-pravaha-backend
 
-Cloud Pravaha is a multi-tenant OpenTofu platform that deploys only **pinned public registry modules**. Nobody writes HCL. This repository builds one Go binary, `pravaha`, with three roles:
+Cloud Pravaha is a multi-tenant OpenTofu platform that deploys only **pinned public registry modules**, called **kinds** (`S3Bucket`, `GKECluster`, ...). Nobody writes HCL: teams describe resources in small YAML contracts that hold only what differs from the defaults, and the platform generates the HCL. This repository builds one Go binary, `pravaha`, with three roles:
 
 | Command | Runs | Where |
 | --- | --- | --- |
@@ -30,11 +30,11 @@ Cloud Pravaha is a multi-tenant OpenTofu platform that deploys only **pinned pub
 
 - **Hierarchy.**
   ```
-  Tenant ── cloud connections (N: AWS accounts, GCP projects, Azure subscriptions; each scoped to some or all entities)
-    └─ Entity (a company; N per tenant)
-         └─ Business unit (a product; N per entity) ── environments (connection + tier) ── stacks ── runs
+  Tenant (a client company) ── cloud connections (AWS accounts, GCP projects, Azure subscriptions; each scoped to some or all entities)
+    └─ Entity (a product; N per tenant) ── environments (connection + tier), shared by all its business units
+         └─ Business unit (a unit inside the product; N per entity) ── stacks ── runs
   ```
-  Stacks, environments, runs and audit events belong to a business unit (BU) and record its entity. A BU's environment may use only connections its entity is allowed.
+  Stacks, runs and audit events belong to a business unit (BU) and record its entity. Environments belong to the entity and are shared by its BUs; they may use only connections the entity is allowed. Entity and BU slugs never coincide.
 - **The wrapper.** Central authenticates the user and checks they have a role in the tenant. It then forwards the request to that tenant's backend over mTLS.
   - It strips the user's token and attaches a 60-second ES256 assertion: who the user is, their roles in that tenant, and the exact method and path.
   - The tenant plane accepts user requests only with central's client certificate plus a valid assertion. The assertion is checked for audience (this tenant), request binding and expiry, and can be used only once.
@@ -62,22 +62,79 @@ Tenant admins and Security can add Rego policy sets (`package pravaha.policy`, r
 
 Starter packs live in `cloud-pravaha-test-resources/policies`.
 
-## Git integration: contracts repositories
+## Kinds, defaults and contracts
 
-Each tenant can keep its stacks as contracts in a Git branch (GitHub, GitLab, or self-hosted either), one JSON file per stack (`{"name","environment","spec"}`); see `cloud-pravaha-test-resources/contracts-example`. It works like this:
+Every resource is a **kind**: a catalog entry in `cloud-pravaha-modules/catalog/modules/<cloud>/<name>.yaml` that wraps one public module at pinned versions, lists the inputs people may set (with the kind's defaults), the enforced security baseline, and the approved outputs.
 
-- **Pull-based sync:** the tenant plane polls the branch, outbound only, and downloads a snapshot when the commit changes.
-- **Git-managed stacks:** it creates or updates stacks managed by Git, which can't be edited in the UI or API, and records the source commit.
-- **Automatic plans:** with `auto_plan`, a plan is queued for every new or changed contract. Plans keep the usual risk-based approvals. With `auto_apply_low_risk`, the system signs low-risk plans (non-production additions), recorded as `system:auto-deploy:<step>`.
-- **Folder layout:** `"layout": "nested"` arranges contracts as `<path>/<entity>/<environment>/<bu>/<stack>.json`.
-  - The entity's environments are shared by its BUs, so the folders name the entity, then the environment, then the owning BU.
-  - A file may also name the environment or BU, but it must agree with the folders.
-  - A BU filed under another entity is refused.
-  - The default `"flat"` layout keeps `<path>/<stack>.json`, with `"bu"` and `"environment"` inside the file.
-  - The tenant plane checks BUs against a directory of the tenant's BUs and their entities. It learns this from central's signed requests and persists it.
-- **Problems are reported, not applied:** invalid contracts are reported per file. A contract can't take over a stack managed in the UI, and removed contracts are reported as orphaned, never destroyed automatically.
+Inputs are resolved in layers, each overriding the one before:
+
+| Layer | Where | Example |
+| --- | --- | --- |
+| kind defaults | the kind's `inputs[].default` | `force_destroy: false` |
+| tenant defaults | `tenants/<tenant>/defaults/<Kind>.yaml`, `spec:` | `tags: {cost-centre: acme-platform}` |
+| tenant tier defaults | the same file, `tiers.prod:` / `tiers.nonprod:` | `force_destroy: false` in prod |
+| the contract | the resource's `spec:` | `bucket: acme-orders-dev` |
+
+Maps of strings (tags, labels) merge key by key; other values are replaced. Required inputs may be satisfied by a default. The enforced baseline cannot be touched at any layer, and the generated HCL notes which default layers a module used.
+
+### Contracts repositories
+
+Each tenant can keep its stacks as YAML contracts in a Git branch (GitHub, GitLab, or self-hosted either), **one resource per file**, Kubernetes style; see `cloud-pravaha-test-resources/contracts-example`:
+
+```yaml
+# stacks/retail/dev/payments/orders/db.yaml   <entity>/<environment>/<bu>/<stack>/<resource>.yaml
+apiVersion: pravaha/v1
+kind: RDSDatabase
+metadata:
+  name: orders-db          # defaults to the file name
+spec:                      # only what differs from the defaults
+  identifier: orders
+  kms_key_id:
+    ref: orders-key.key_arn                       # another resource of the stack
+  master_password:
+    secretRef: vault://kv/payments/orders-db#password   # never the value
+imports:                   # optional: adopt existing resources
+  - {to: aws_db_instance.this[0], id: orders}
+```
+
+- **The folder is the stack** (one state file). With `"layout": "nested"` the folders name the entity, its shared environment and the owning BU; with the default `"flat"` layout (`<path>/<stack>/<resource>.yaml`) each file names `metadata.environment` and `metadata.bu`, and they must agree.
+- **Strict YAML.** Anchors, aliases, merge keys, custom tags, duplicate keys and unknown fields are refused. A stack with any problem is reported and not applied, never half-applied.
+- **Pull-based sync:** the tenant plane polls the branch, outbound only, and downloads a snapshot when the commit changes (or right away on a GitHub push webhook).
+- **Git-managed stacks** can't be edited in the UI or API; the source commit is recorded. With `auto_plan`, a plan is queued for every new or changed stack; with `auto_apply_low_risk`, the system signs low-risk plans, recorded as `system:auto-deploy:<step>`.
+- A contract can't take over a stack managed in the UI, and removed stacks are reported as orphaned, never destroyed automatically.
 
 API: `GET/PUT /contracts`, `PUT /contracts/token` (read-only token, sealed with the tenant master key, never returned), and `POST /contracts/sync`. The development-only `local` provider needs `PRAVAHA_ALLOW_LOCAL_CONTRACTS=1`.
+
+### Generated HCL
+
+The platform writes the stack's `main.tf` itself with HashiCorp's `hclwrite`: pinned engine, providers and modules, the enforced baseline first in each module, workload-identity providers only, and its own HTTP state backend. Every value from a contract or a default is a literal; `hclwrite` escapes `${` and `%{`, so data can never become an expression. The only expressions are references the platform builds from validated names.
+
+## Secrets: OpenBao / Vault references
+
+Secrets never go in Git or the platform's database. A contract passes `secretRef: vault://<mount>/<path>#<key>` (KV v2), and the generated HCL reads it with a `vault_kv_secret_v2` data source at plan time.
+
+- **No stored Vault credentials.** The tenant configures only the address, the JWT auth mount and the role (Integrations → Secret store, `PUT /integrations/secret-store`). Runs log in with their own short-lived token from the tenant's OIDC issuer, issued for the store's own audience (default `pravaha-vault`), so a cloud token can never be replayed against Vault or the other way round. The `sub` claim names the entity, environment, stack and phase, so Vault policies can be scoped exactly.
+- **Sensitive inputs** (marked `sensitive: true` in a kind) accept only a secretRef; literal values that look like credentials (cloud keys, private keys, JWTs, tokens) are refused everywhere.
+- Values read from the store end up in state and saved plans, which are always encrypted.
+
+## Module and policy releases
+
+The platform builds what the tenant keeps in Git into **releases** and deploys them through the console (Tenant settings → Releases):
+
+1. **Validate:** the catalog of kinds loads and passes its rules; this tenant's defaults target real kinds and pass the same checks as contract values.
+2. **Vendor:** every approved module version and declared dependency is downloaded from the registry (or `PRAVAHA_REGISTRY_URL`, a mirror), pinned to the commit the registry points at.
+3. **Pin nested modules:** starting from what each kind loads, nested registry modules are rewritten to vendored, approved versions (the highest approved version that satisfies the module's own constraint). Any other source (git, http, s3) fails the build, and configuration nothing loads is left out of the bundle.
+4. **Check:** no loaded module runs commands (provisioners, the external data source), and every kind's inputs, baseline keys and outputs exist in each module version.
+5. **Bundle and store:** one deterministic tarball named by its SHA-256, in the tenant bucket (S3, MinIO, GCS) or PostgreSQL, with a manifest carrying the catalog, this tenant's defaults and the package index.
+6. **Deploy, roll back:** a tenant admin deploys a ready release (or `auto_deploy` does); deploying an older release is a rollback. The defaults deploy with the release, so after a deploy nothing reads the modules repository or the registry until the next build.
+
+Runs then use **only** the deployed release: the generated config loads modules from `vendor/` and lists each package it needs with its checksum. The runner downloads the bundle once, extracts only those packages, verifies every checksum, and `tofu init` downloads no module from the internet. Because the config pins packages rather than release numbers, a deploy makes a waiting plan stale only if the modules that stack loads actually changed.
+
+**Policy releases** do the same for Rego: `global/<set>.rego` (every tenant), `tenants/<tenant>/`, `tenants/<tenant>/entities/<entity>/` and `tenants/<tenant>/bus/<bu>/`, with optional `<set>_test.rego` (run on every build; a failing test stops the release) and `<set>.yaml` (`level: hard | advisory`, `description`). Deployed sets are read-only in the console.
+
+**Caching.** Bundles are immutable and content-addressed. The tenant plane keeps them in memory (`PRAVAHA_BUNDLE_CACHE_MEMORY_MB`, default 256) and on disk (`PRAVAHA_BUNDLE_CACHE_DIR`, `PRAVAHA_BUNDLE_CACHE_DISK_MB`), runners keep their own disk cache, every copy is verified against its checksum when loaded, and concurrent misses share one read, so the bucket or database is read once per bundle. `GET /releases/cache` shows the hit counts.
+
+API: `GET/PUT /releases/{modules|policies}/source`, `PUT …/source/token`, `POST …/builds`, `GET /releases/{kind}`, `GET /releases/{kind}/{id}`, `POST /releases/{kind}/{id}/deploy`. Builds also start on a GitHub push to the source branch, or by polling, when `enabled` is set.
 
 ## GitHub App and webhooks
 
@@ -213,9 +270,9 @@ It also has a catalog data source. Stacks are not provider resources. They stay 
 
 ## How a change flows
 
-1. **Spec.** A developer submits a stack spec listing catalog modules, literal inputs and `{"$ref": "module.output"}` wiring. Anything outside the catalog, version ranges, `${…}`/`%{…}` templates and unknown fields are rejected.
-2. **Generated config.** The tenant plane generates `main.tf.json`: exact module, provider and engine pins, enforced baselines, workload-identity authentication only, and its own HTTP state backend.
-3. **Plan.** A runner claims the job by polling outbound, runs `tofu init` with provider installation restricted to the allowlist, and verifies every downloaded module and provider (`depcheck`). It then plans with enforced state and plan encryption and uploads a summary with sensitive values removed.
+1. **Spec.** A contract (or the console) lists resources by kind with only the values that differ from the defaults, `ref` wiring and `secretRef`s. Anything outside the catalog, version ranges, `${…}`/`%{…}` templates, literal credentials and unknown fields are rejected.
+2. **Generated config.** The tenant plane resolves defaults and generates `main.tf`: exact module, provider and engine pins, enforced baselines, workload-identity authentication only, its own HTTP state backend, and the vendored module packages with their checksums.
+3. **Plan.** A runner claims the job by polling outbound, extracts and verifies the release's module packages, runs `tofu init` with provider installation restricted to the allowlist, and verifies every module and provider (`depcheck`). It then plans with enforced state and plan encryption and uploads a summary with sensitive values removed.
 4. **Policy and risk.** Policy blocks over-limit deletions, static-credential resources, open ingress and public buckets. Risk classification sets the approval chain.
 5. **Approvals.** Every signature re-checks that the config and state are unchanged; a stale plan is discarded. The last signature queues the apply.
 6. **Apply.** The runner verifies the saved plan's SHA-256 and applies exactly that plan.
@@ -366,6 +423,7 @@ See [SECURITY.md](SECURITY.md) for the security controls and how they map to com
 
 ## Roadmap
 
-This build covers the tenancy core of the platform design. Coming next:
-- Pull-request plans: speculative plans posted back to Git pull requests
+Coming next:
+- State diff between versions and rollback
+- Policy exemptions and scan hooks
 - Resource discovery for backporting (listing a cloud account's resources to suggest imports)

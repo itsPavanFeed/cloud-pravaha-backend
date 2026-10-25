@@ -59,6 +59,16 @@ runner:
     requests: { cpu: 250m, memory: 512Mi }
     limits: { memory: 4Gi }
   tmpSize: 4Gi
+  bundleCacheMB: 1024   # module release bundles kept on the runner (inside tmpSize)
+
+# Module release bundles: cached in memory and on a local volume.
+bundleCache:
+  memoryMB: 256
+  diskMB: 2048
+  volumeSize: 3Gi
+
+# Optional private mirror of registry.opentofu.org for module release builds.
+registryURL: ""
 
 resources:
   requests: { cpu: 100m, memory: 128Mi }

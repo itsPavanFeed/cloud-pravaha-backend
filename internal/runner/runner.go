@@ -701,7 +701,8 @@ func scrub(v, sens, unk any) any {
 
 // logSink batches log output and ships it to the control plane every second.
 type logSink struct {
-	mu   sync.Mutex
+	mu      sync.Mutex
+	stopped bool // the control plane no longer accepts this run's token
 	buf  bytes.Buffer
 	ctx  context.Context
 	r    *Runner
@@ -744,7 +745,7 @@ func (l *logSink) Printf(format string, a ...any) { fmt.Fprintf(l, format, a...)
 
 func (l *logSink) Flush() {
 	l.mu.Lock()
-	if l.buf.Len() == 0 {
+	if l.buf.Len() == 0 || l.stopped {
 		l.mu.Unlock()
 		return
 	}
@@ -756,6 +757,15 @@ func (l *logSink) Flush() {
 	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
 	if resp, err := l.r.http.Do(req); err == nil {
 		resp.Body.Close()
+		// The run ended on the control plane (discarded, timed out): its token
+		// is no longer valid. Retrying would only count as failed logins and
+		// could lock this runner's address out.
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
+			l.mu.Lock()
+			l.stopped = true
+			l.mu.Unlock()
+			l.r.log.Warn("the control plane no longer accepts this run's logs; stopped shipping them", "run", l.job.RunID, "status", resp.StatusCode)
+		}
 	} else {
 		l.r.log.Warn("shipping logs failed", "err", err)
 	}

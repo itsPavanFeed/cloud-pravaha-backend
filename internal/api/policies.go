@@ -92,6 +92,10 @@ func (s *Server) updatePolicy(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreErr(w, err, "")
 		return
 	}
+	if cur.Source == "release" {
+		writeErr(w, http.StatusConflict, "this policy set comes from a policy release; change it in the policies repository and deploy a new release")
+		return
+	}
 	var b policyBody
 	if !decode(w, r, &b) || !b.check(w, false) {
 		return
@@ -111,6 +115,10 @@ func (s *Server) deletePolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cur, err := s.store.GetPolicySet(r.Context(), r.PathValue("id"))
+	if err == nil && cur.Source == "release" {
+		writeErr(w, http.StatusConflict, "this policy set comes from a policy release; remove it from the policies repository and deploy a new release")
+		return
+	}
 	if err == nil {
 		err = s.store.DeletePolicySet(r.Context(), cur.ID)
 	}

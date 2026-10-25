@@ -46,6 +46,14 @@ spec:
             - { name: PRAVAHA_ASSISTANT_BASE_URL, value: {{ . | quote }} }
             {{- end }}
             {{- end }}
+            # Release bundles are cached in memory and here, so the bucket or
+            # database is read once per bundle.
+            - { name: PRAVAHA_BUNDLE_CACHE_DIR, value: /cache/bundles }
+            - { name: PRAVAHA_BUNDLE_CACHE_MEMORY_MB, value: {{ .Values.bundleCache.memoryMB | quote }} }
+            - { name: PRAVAHA_BUNDLE_CACHE_DISK_MB, value: {{ .Values.bundleCache.diskMB | quote }} }
+            {{- with .Values.registryURL }}
+            - { name: PRAVAHA_REGISTRY_URL, value: {{ . | quote }} }
+            {{- end }}
             {{- with .Values.temporal.address }}
             - { name: PRAVAHA_TEMPORAL_ADDRESS, value: {{ . | quote }} }
             - { name: PRAVAHA_TEMPORAL_NAMESPACE, value: {{ $.Values.temporal.namespace | quote }} }
@@ -58,7 +66,10 @@ spec:
             - { name: secrets, mountPath: /secrets, readOnly: true }
             - { name: tls, mountPath: /tls, readOnly: true }
             - { name: central-ca, mountPath: /central-ca, readOnly: true }
+            - { name: cache, mountPath: /cache }
       volumes:
+        - name: cache
+          emptyDir: { sizeLimit: {{ .Values.bundleCache.volumeSize }} }
         - name: secrets
           secret: { secretName: {{ .Values.existingSecret }}, defaultMode: 0400 }
         - name: tls
