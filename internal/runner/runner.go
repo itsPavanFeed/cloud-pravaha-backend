@@ -703,12 +703,12 @@ func scrub(v, sens, unk any) any {
 type logSink struct {
 	mu      sync.Mutex
 	stopped bool // the control plane no longer accepts this run's token
-	buf  bytes.Buffer
-	ctx  context.Context
-	r    *Runner
-	job  *api.Job
-	done chan struct{}
-	wg   sync.WaitGroup
+	buf     bytes.Buffer
+	ctx     context.Context
+	r       *Runner
+	job     *api.Job
+	done    chan struct{}
+	wg      sync.WaitGroup
 }
 
 func newLogSink(ctx context.Context, r *Runner, j *api.Job) *logSink {
