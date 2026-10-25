@@ -111,6 +111,7 @@ PRAVAHA_DATABASE_URL="$(dburl acme)" PRAVAHA_MASTER_KEY="$ACME_MASTER_KEY" PRAVA
 PRAVAHA_LISTEN=127.0.0.1:$TP PRAVAHA_PUBLIC_URL=https://localhost:$TP PRAVAHA_TLS_CERT="$C/acme.pem" PRAVAHA_TLS_KEY="$C/acme-key.pem" \
 PRAVAHA_CENTRAL_URL="$CENTRAL" PRAVAHA_CENTRAL_CLIENT_CA="$C/ca.pem" \
 PRAVAHA_CATALOG_DIR="$ROOT/cloud-pravaha-modules/catalog" PRAVAHA_TOFU_VERSION="$TOFU_VERSION" \
+PRAVAHA_ALLOW_LOCAL_CONTRACTS=1 PRAVAHA_BUNDLE_CACHE_DIR="$DEV/bundles-acme" \
   bin/pravaha tenant >"$DEV/tenant-acme.log" 2>&1 &
 PIDS+=($!)
 until curl -fsS "$CENTRAL/healthz" >/dev/null 2>&1 && curl -fsS --cacert "$C/ca.pem" https://localhost:$TP/healthz >/dev/null 2>&1; do sleep 0.5; done
@@ -168,10 +169,16 @@ except Exception: print("")' || true)
   fi
 fi
 RUNNER_TOKEN=$(grep '^RUNNER_TOKEN=' "$DEV/tokens.env" | cut -d= -f2)
+# Point module releases at the local modules checkout (once): Tenant settings → Releases → Build now.
+ADMIN=$(sed -n 's/^ROOT=\([^ ]*\).*/\1/p' "$DEV/tokens.env")
+if ! curl -fsS -H "Authorization: Bearer $ADMIN" "$CENTRAL/api/v1/t/acme/releases/modules/source" 2>/dev/null | grep -q '"repo"'; then
+  curl -sS -o /dev/null -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' -X PUT "$CENTRAL/api/v1/t/acme/releases/modules/source" \
+    --data-binary "{\"provider\":\"local\",\"repo\":\"$ROOT/cloud-pravaha-modules\",\"branch\":\"main\",\"path\":\"\",\"poll_seconds\":300,\"enabled\":false,\"auto_deploy\":false}" || true
+fi
 
 PRAVAHA_SERVER_URL=https://localhost:$TP PRAVAHA_RUNNER_TOKEN="$RUNNER_TOKEN" PRAVAHA_STATE_KEY="$PRAVAHA_STATE_KEY" \
 PRAVAHA_CA_FILE="$C/ca.pem" PRAVAHA_WORK_DIR="$DEV/runs" PRAVAHA_PLUGIN_CACHE_DIR="$DEV/plugin-cache" \
-PRAVAHA_CATALOG_DIR="$ROOT/cloud-pravaha-modules/catalog" \
+PRAVAHA_CATALOG_DIR="$ROOT/cloud-pravaha-modules/catalog" PRAVAHA_BUNDLE_CACHE_DIR="$DEV/runner-bundles" \
   bin/pravaha runner >"$DEV/runner-acme.log" 2>&1 &
 PIDS+=($!)
 mkdir -p "$DEV/plugin-cache"
